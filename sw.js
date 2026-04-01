@@ -13,6 +13,11 @@ const PRECACHE = [
   'https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Mono:wght@300;400&display=swap',
 ];
 
+// Allow main thread to trigger immediate activation
+self.addEventListener('message', e => {
+  if (e.data?.type === 'SKIP_WAITING') self.skipWaiting();
+});
+
 // Install: cache app shell
 self.addEventListener('install', e => {
   e.waitUntil(

@@ -675,6 +675,50 @@
     text-align: center;
     padding: 24px;
   }
+
+  /* ── Resume prompt ── */
+  .resume-icon { font-size: 2.5rem; opacity: .6; }
+  .resume-title {
+    font-size: 1.3rem;
+    font-weight: 300;
+    color: var(--text);
+    letter-spacing: .04em;
+  }
+  .resume-file {
+    font-family: 'DM Mono', monospace;
+    font-size: .68rem;
+    color: var(--text-dim);
+    max-width: 320px;
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .resume-btns { display: flex; gap: 10px; margin-top: 6px; }
+  .resume-yes {
+    padding: 9px 24px;
+    background: var(--amber);
+    color: var(--bg);
+    border: none;
+    border-radius: var(--radius);
+    font-family: 'DM Mono', monospace;
+    font-size: .75rem;
+    cursor: pointer;
+    transition: background .15s;
+  }
+  .resume-yes:hover { background: #e6a830; }
+  .resume-no {
+    padding: 9px 18px;
+    background: transparent;
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-family: 'DM Mono', monospace;
+    font-size: .75rem;
+    cursor: pointer;
+    transition: color .15s, border-color .15s;
+  }
+  .resume-no:hover { color: var(--text); border-color: var(--text-dim); }
 </style>
 </head>
 <body>
@@ -1609,7 +1653,23 @@ function setStatus(msg) {
 // ─── Service Worker registration ──────────────────────────────────────────────
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('./sw.js').catch(() => {});
+    navigator.serviceWorker.register('./sw.js').then(reg => {
+      // Check for updates every time the app loads
+      reg.update();
+      // When a new SW is waiting, activate it immediately
+      reg.addEventListener('updatefound', () => {
+        const newWorker = reg.installing;
+        newWorker.addEventListener('statechange', () => {
+          if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+            newWorker.postMessage({ type: 'SKIP_WAITING' });
+          }
+        });
+      });
+    }).catch(() => {});
+    // When SW activates, reload to get fresh content
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      window.location.reload();
+    });
   });
 }
 
@@ -1680,10 +1740,56 @@ async function restoreSession() {
   try {
     await openDB();
     const saved = await dbGet('files', 'current');
-    if (!saved) return; // nothing stored yet
+    if (!saved || !saved.data || saved.data.byteLength < 100) return;
+
+    // Show resume prompt on drop zone instead of auto-loading
+    showResumePrompt(saved.name);
+
+  } catch (err) {
+    // Silently fail — show drop zone as normal
+  }
+}
+
+function showResumePrompt(filename) {
+  const prompt = document.createElement('div');
+  prompt.id = 'resume-prompt';
+  prompt.innerHTML = `
+    <div class="resume-icon">📖</div>
+    <div class="resume-title">Continue reading?</div>
+    <div class="resume-file">${escHtml(filename)}</div>
+    <div class="resume-btns">
+      <button class="resume-yes" id="resume-yes-btn">Resume</button>
+      <button class="resume-no" id="resume-no-btn">Start fresh</button>
+    </div>
+  `;
+  prompt.style.cssText = `
+    position:absolute; inset:0; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:12px;
+    background:var(--bg); border-radius:var(--radius); z-index:10;
+  `;
+  dropZone.style.position = 'relative';
+  dropZone.appendChild(prompt);
+
+  $('resume-yes-btn').addEventListener('click', async () => {
+    prompt.remove();
+    await doRestore();
+  });
+
+  $('resume-no-btn').addEventListener('click', () => {
+    prompt.remove();
+    if (db) {
+      dbPut('files',    { id: 'current', name: '', data: new ArrayBuffer(0) }).catch(() => {});
+      dbPut('position', { id: 'current', chapter: 0, wordIndex: 0 }).catch(() => {});
+    }
+  });
+}
+
+async function doRestore() {
+  try {
+    const saved = await dbGet('files', 'current');
+    if (!saved || !saved.data || saved.data.byteLength < 100) return;
 
     showLoading('Restoring your last book…');
-
     const file = new File([saved.data], saved.name, { type: saved.type });
     const ext  = saved.name.split('.').pop().toLowerCase();
 
@@ -1694,12 +1800,10 @@ async function restoreSession() {
 
     fileMeta.textContent = saved.name;
 
-    // Restore position
-    const pos = await dbGet('position', 'current');
+    const pos       = await dbGet('position', 'current');
     const chapter   = pos?.chapter   || 0;
     const wordIndex = pos?.wordIndex || 0;
 
-    // Populate chapters but jump to saved position instead of 0
     chapterSelect.innerHTML = '';
     state.chapters.forEach((ch, i) => {
       const opt = document.createElement('option');
@@ -1708,7 +1812,6 @@ async function restoreSession() {
       chapterSelect.appendChild(opt);
     });
 
-    // Load chapter without resetting word index
     state.currentChapter = chapter;
     chapterSelect.value  = chapter;
     prevCh.disabled = chapter === 0;
@@ -1717,19 +1820,16 @@ async function restoreSession() {
     state.wordIndex = Math.min(wordIndex, state.words.filter(w => /\S/.test(w)).length - 1);
 
     renderText();
-    // Scroll to approximate position
     const pct = state.wordIndex / Math.max(1, state.words.filter(w => /\S/.test(w)).length);
     progressFill.style.width = (pct * 100) + '%';
-    setTimeout(() => {
-      textDisplay.scrollTop = textDisplay.scrollHeight * pct;
-    }, 100);
+    setTimeout(() => { textDisplay.scrollTop = textDisplay.scrollHeight * pct; }, 100);
 
-    setStatus('resumed — ' + state.chapters[chapter].title);
+    setStatus('tap play to resume — ' + state.chapters[chapter].title);
     showReader();
 
   } catch (err) {
     hideLoading();
-    // Silently fail — just show drop zone as normal
+    showError('Could not restore session. Please reload your book.');
   }
 }
 
