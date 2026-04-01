@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Background -->
+  <rect width="512" height="512" rx="96" fill="#0f0e0c"/>
+
+  <!-- Open book -->
+  <g transform="translate(256,230)">
+    <!-- Left page -->
+    <path d="M-10,-90 C-10,-90 -120,-80 -140,-50 L-140,90 C-120,65 -10,72 -10,72 Z"
+          fill="#221f16" stroke="#d4952a" stroke-width="4"/>
+    <!-- Right page -->
+    <path d="M10,-90 C10,-90 120,-80 140,-50 L140,90 C120,65 10,72 10,72 Z"
+          fill="#221f16" stroke="#d4952a" stroke-width="4"/>
+    <!-- Spine -->
+    <line x1="0" y1="-90" x2="0" y2="72" stroke="#d4952a" stroke-width="5"/>
+
+    <!-- Left page lines -->
+    <line x1="-30" y1="-50" x2="-120" y2="-44" stroke="#d4952a" stroke-width="3" opacity="0.4"/>
+    <line x1="-30" y1="-28" x2="-120" y2="-22" stroke="#d4952a" stroke-width="3" opacity="0.4"/>
+    <line x1="-30" y1="-6"  x2="-120" y2="0"   stroke="#d4952a" stroke-width="3" opacity="0.4"/>
+    <line x1="-30" y1="16"  x2="-110" y2="22"  stroke="#d4952a" stroke-width="3" opacity="0.4"/>
+
+    <!-- Right page lines -->
+    <line x1="30" y1="-50" x2="120" y2="-44" stroke="#d4952a" stroke-width="3" opacity="0.4"/>
+    <line x1="30" y1="-28" x2="120" y2="-22" stroke="#d4952a" stroke-width="3" opacity="0.4"/>
+    <line x1="30" y1="-6"  x2="120" y2="0"   stroke="#d4952a" stroke-width="3" opacity="0.4"/>
+    <line x1="30" y1="16"  x2="110" y2="22"  stroke="#d4952a" stroke-width="3" opacity="0.4"/>
+  </g>
+
+  <!-- Sound waves -->
+  <g transform="translate(256, 370)" stroke="#d4952a" fill="none" stroke-linecap="round">
+    <path d="M-50,0 Q-50,-22 -35,-22" stroke-width="8" opacity="0.5"/>
+    <path d="M50,0  Q50,-22 35,-22"   stroke-width="8" opacity="0.5"/>
+    <path d="M-70,8 Q-72,-38 -52,-44" stroke-width="6" opacity="0.3"/>
+    <path d="M70,8  Q72,-38 52,-44"   stroke-width="6" opacity="0.3"/>
+  </g>
+</svg>

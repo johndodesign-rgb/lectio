@@ -1,0 +1,1610 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lectio — Natural Language Reader</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0f0e0c">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="Lectio">
+<link rel="apple-touch-icon" href="icon-512.png">
+
+<!-- PDF.js -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<!-- JSZip for EPUB -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<!-- Mammoth for DOCX -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Mono:wght@300;400&display=swap');
+
+  :root {
+    --bg:       #0f0e0c;
+    --surface:  #18160f;
+    --surface2: #221f16;
+    --border:   #2e2a1e;
+    --amber:    #d4952a;
+    --amber-dim:#8a5f14;
+    --text:     #e8dfc8;
+    --text-dim: #7a7260;
+    --text-mid: #b0a488;
+    --danger:   #c0392b;
+    --radius:   6px;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Cormorant Garamond', Georgia, serif;
+    font-size: 18px;
+    line-height: 1.7;
+  }
+
+  /* ── Layout ── */
+  #app {
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    height: 100vh;
+    max-width: 860px;
+    margin: 0 auto;
+    padding: 0 24px;
+  }
+
+  /* ── Header ── */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 20px 0 16px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .wordmark {
+    font-size: 1.4rem;
+    font-weight: 300;
+    letter-spacing: .18em;
+    text-transform: uppercase;
+    color: var(--amber);
+  }
+
+  .wordmark span { font-style: italic; font-weight: 400; }
+
+  #file-meta {
+    font-family: 'DM Mono', monospace;
+    font-size: .68rem;
+    color: var(--text-dim);
+    text-align: right;
+    max-width: 420px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* ── Drop zone ── */
+  #drop-zone {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    height: 100%;
+    border: 1.5px dashed var(--border);
+    border-radius: var(--radius);
+    margin: 28px 0;
+    cursor: pointer;
+    transition: border-color .2s, background .2s;
+  }
+
+  #drop-zone:hover, #drop-zone.drag-over {
+    border-color: var(--amber);
+    background: rgba(212,149,42,.04);
+  }
+
+  #drop-zone .icon {
+    font-size: 3rem;
+    opacity: .35;
+  }
+
+  #drop-zone h2 {
+    font-size: 1.5rem;
+    font-weight: 300;
+    letter-spacing: .04em;
+    color: var(--text-mid);
+  }
+
+  #drop-zone p {
+    font-family: 'DM Mono', monospace;
+    font-size: .72rem;
+    color: var(--text-dim);
+  }
+
+  #file-input { display: none; }
+
+  .btn-upload {
+    margin-top: 8px;
+    padding: 10px 28px;
+    background: transparent;
+    border: 1px solid var(--amber-dim);
+    color: var(--amber);
+    font-family: 'DM Mono', monospace;
+    font-size: .75rem;
+    letter-spacing: .1em;
+    cursor: pointer;
+    border-radius: var(--radius);
+    transition: background .15s, border-color .15s;
+  }
+
+  .btn-upload:hover {
+    background: rgba(212,149,42,.08);
+    border-color: var(--amber);
+  }
+
+  /* ── Reading view ── */
+  #reader-view {
+    display: none;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  #chapter-nav {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 0 10px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  #chapter-nav label {
+    font-family: 'DM Mono', monospace;
+    font-size: .68rem;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+
+  #chapter-select {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: 'DM Mono', monospace;
+    font-size: .72rem;
+    padding: 6px 10px;
+    border-radius: var(--radius);
+    cursor: pointer;
+  }
+
+  #chapter-select:focus { outline: 1px solid var(--amber); }
+
+  .nav-btn {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-mid);
+    padding: 6px 12px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-size: .85rem;
+    transition: color .15s, border-color .15s;
+  }
+
+  .nav-btn:hover:not(:disabled) { color: var(--amber); border-color: var(--amber-dim); }
+  .nav-btn:disabled { opacity: .3; cursor: default; }
+
+  /* ── Text area ── */
+  #text-display {
+    flex: 1;
+    overflow-y: auto;
+    padding: 36px 8px 20px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+
+  #text-display::-webkit-scrollbar { width: 4px; }
+  #text-display::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+  #text-content {
+    font-size: 1.15rem;
+    line-height: 1.85;
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  /* Highlighted word during TTS */
+  .speaking-word {
+    background: rgba(212,149,42,.22);
+    color: var(--amber);
+    border-radius: 2px;
+    padding: 0 1px;
+  }
+
+  /* ── Progress bar ── */
+  #progress-track {
+    height: 2px;
+    background: var(--border);
+    position: relative;
+    flex-shrink: 0;
+  }
+
+  #progress-fill {
+    height: 100%;
+    background: var(--amber);
+    width: 0%;
+    transition: width .3s;
+  }
+
+  /* ── Player controls ── */
+  #player {
+    padding: 16px 0 20px;
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .controls-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+  }
+
+  .ctrl-btn {
+    background: none;
+    border: none;
+    color: var(--text-mid);
+    cursor: pointer;
+    font-size: 1.1rem;
+    padding: 8px;
+    border-radius: 50%;
+    transition: color .15s, background .15s;
+    width: 38px;
+    height: 38px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .ctrl-btn:hover { color: var(--amber); background: rgba(212,149,42,.08); }
+
+  #play-btn {
+    width: 52px;
+    height: 52px;
+    background: var(--amber);
+    color: var(--bg);
+    border-radius: 50%;
+    font-size: 1.4rem;
+    border: none;
+    cursor: pointer;
+    transition: background .15s, transform .1s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  #play-btn:hover { background: #e6a830; transform: scale(1.05); }
+  #play-btn:active { transform: scale(.97); }
+
+  /* settings row */
+  .settings-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .setting {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .setting label {
+    font-family: 'DM Mono', monospace;
+    font-size: .65rem;
+    color: var(--text-dim);
+    letter-spacing: .06em;
+    white-space: nowrap;
+  }
+
+  input[type=range] {
+    -webkit-appearance: none;
+    width: 90px;
+    height: 2px;
+    background: var(--border);
+    border-radius: 2px;
+    cursor: pointer;
+  }
+
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 12px;
+    height: 12px;
+    background: var(--amber);
+    border-radius: 50%;
+  }
+
+  select.setting-select {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-mid);
+    font-family: 'DM Mono', monospace;
+    font-size: .65rem;
+    padding: 4px 8px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    max-width: 160px;
+  }
+
+  .setting-val {
+    font-family: 'DM Mono', monospace;
+    font-size: .65rem;
+    color: var(--amber-dim);
+    min-width: 28px;
+  }
+
+  /* ── Status ── */
+  #status-bar {
+    font-family: 'DM Mono', monospace;
+    font-size: .65rem;
+    color: var(--text-dim);
+    text-align: center;
+    letter-spacing: .05em;
+  }
+
+  /* ── Loading overlay ── */
+  #loading {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(15,14,12,.85);
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 16px;
+    z-index: 100;
+  }
+
+  #loading.active { display: flex; }
+
+  .spinner {
+    width: 36px;
+    height: 36px;
+    border: 2px solid var(--border);
+    border-top-color: var(--amber);
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  #loading p {
+    font-family: 'DM Mono', monospace;
+    font-size: .72rem;
+    color: var(--text-dim);
+    letter-spacing: .08em;
+  }
+
+  /* ── Error ── */
+  #error-msg {
+    display: none;
+    font-family: 'DM Mono', monospace;
+    font-size: .75rem;
+    color: var(--danger);
+    text-align: center;
+    padding: 10px;
+  }
+
+  /* ── Voice picker button ── */
+  .voice-picker-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-mid);
+    font-family: 'DM Mono', monospace;
+    font-size: .65rem;
+    padding: 5px 10px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    max-width: 180px;
+    transition: border-color .15s, color .15s;
+  }
+  .voice-picker-btn:hover { border-color: var(--amber-dim); color: var(--amber); }
+  #voice-picker-label {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 140px;
+  }
+  .voice-picker-caret { opacity: .5; flex-shrink: 0; }
+
+  /* ── Voice modal ── */
+  .voice-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(10,9,7,.75);
+    backdrop-filter: blur(4px);
+    z-index: 200;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    padding: 0 0 env(safe-area-inset-bottom, 0);
+  }
+  .voice-modal.hidden { display: none; }
+
+  .voice-modal-inner {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-bottom: none;
+    border-radius: 14px 14px 0 0;
+    width: 100%;
+    max-width: 600px;
+    max-height: 72vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .voice-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 18px 20px 10px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .voice-modal-title {
+    font-size: 1rem;
+    font-weight: 400;
+    letter-spacing: .06em;
+    color: var(--text);
+  }
+
+  .voice-modal-close {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-size: .9rem;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: var(--radius);
+    transition: color .15s;
+  }
+  .voice-modal-close:hover { color: var(--text); }
+
+  .voice-modal-hint {
+    font-family: 'DM Mono', monospace;
+    font-size: .62rem;
+    color: var(--text-dim);
+    padding: 8px 20px;
+    flex-shrink: 0;
+  }
+
+  #voice-list {
+    overflow-y: auto;
+    flex: 1;
+    padding: 8px 12px 20px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+
+  .voice-group-label {
+    font-family: 'DM Mono', monospace;
+    font-size: .6rem;
+    letter-spacing: .12em;
+    color: var(--amber-dim);
+    padding: 12px 8px 6px;
+    text-transform: uppercase;
+  }
+
+  .voice-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 10px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: background .12s;
+    border: 1px solid transparent;
+  }
+  .voice-row:hover { background: rgba(255,255,255,.04); }
+  .voice-row.selected {
+    background: rgba(212,149,42,.08);
+    border-color: var(--amber-dim);
+  }
+
+  .voice-preview-btn {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    border-radius: 50%;
+    width: 28px;
+    height: 28px;
+    flex-shrink: 0;
+    cursor: pointer;
+    font-size: .7rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: color .12s, border-color .12s;
+  }
+  .voice-preview-btn:hover { color: var(--amber); border-color: var(--amber-dim); }
+  .voice-preview-btn.previewing { color: var(--amber); border-color: var(--amber); }
+
+  .voice-info { flex: 1; min-width: 0; }
+  .voice-name {
+    font-size: .88rem;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .voice-meta {
+    font-family: 'DM Mono', monospace;
+    font-size: .6rem;
+    color: var(--text-dim);
+    margin-top: 2px;
+  }
+
+  .voice-badge {
+    font-family: 'DM Mono', monospace;
+    font-size: .55rem;
+    padding: 2px 6px;
+    border-radius: 3px;
+    flex-shrink: 0;
+    letter-spacing: .05em;
+  }
+  .badge-premium { background: rgba(212,149,42,.15); color: var(--amber); }
+  .badge-standard { background: rgba(255,255,255,.06); color: var(--text-dim); }
+
+  /* ── Pronunciation dictionary ── */
+  .pronun-inner { max-height: 80vh; }
+
+  .pronun-add-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .pronun-input {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: 'DM Mono', monospace;
+    font-size: .75rem;
+    padding: 7px 10px;
+    border-radius: var(--radius);
+    min-width: 0;
+  }
+  .pronun-input:focus { outline: 1px solid var(--amber); }
+  .pronun-input::placeholder { color: var(--text-dim); }
+
+  .pronun-arrow {
+    color: var(--text-dim);
+    font-size: .9rem;
+    flex-shrink: 0;
+  }
+
+  .pronun-add-btn {
+    background: var(--amber);
+    color: var(--bg);
+    border: none;
+    font-family: 'DM Mono', monospace;
+    font-size: .7rem;
+    padding: 7px 14px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background .15s;
+  }
+  .pronun-add-btn:hover { background: #e6a830; }
+
+  #pronun-list {
+    overflow-y: auto;
+    flex: 1;
+    padding: 8px 12px 16px;
+  }
+
+  .pronun-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 8px;
+    border-radius: var(--radius);
+    border-bottom: 1px solid var(--border);
+  }
+  .pronun-row:last-child { border-bottom: none; }
+
+  .pronun-row-word {
+    font-family: 'DM Mono', monospace;
+    font-size: .75rem;
+    color: var(--text);
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .pronun-row-arrow { color: var(--text-dim); font-size: .8rem; flex-shrink: 0; }
+
+  .pronun-row-phonetic {
+    font-family: 'DM Mono', monospace;
+    font-size: .75rem;
+    color: var(--amber);
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .pronun-del-btn {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: .75rem;
+    padding: 4px 6px;
+    border-radius: var(--radius);
+    flex-shrink: 0;
+    transition: color .12s;
+  }
+  .pronun-del-btn:hover { color: var(--danger); }
+
+  .pronun-empty {
+    font-family: 'DM Mono', monospace;
+    font-size: .7rem;
+    color: var(--text-dim);
+    text-align: center;
+    padding: 24px;
+  }
+</style>
+</head>
+<body>
+
+<div id="app">
+  <header>
+    <div class="wordmark">Le<span>c</span>tio</div>
+    <div id="file-meta">Drop a PDF or EPUB to begin</div>
+  </header>
+
+  <!-- Drop Zone -->
+  <div id="drop-zone">
+    <div class="icon">📖</div>
+    <h2>Drop your book here</h2>
+    <p>PDF &nbsp;·&nbsp; EPUB &nbsp;·&nbsp; DOCX</p>
+    <button class="btn-upload" onclick="document.getElementById('file-input').click()">Choose File</button>
+    <input type="file" id="file-input" accept=".pdf,.epub,.docx">
+  </div>
+
+  <!-- Reader View -->
+  <div id="reader-view">
+
+    <div id="chapter-nav">
+      <label>SECTION</label>
+      <select id="chapter-select"></select>
+      <button class="nav-btn" id="prev-ch" title="Previous">&#8592;</button>
+      <button class="nav-btn" id="next-ch" title="Next">&#8594;</button>
+    </div>
+
+    <div id="text-display">
+      <div id="text-content"></div>
+    </div>
+
+    <div id="progress-track"><div id="progress-fill"></div></div>
+
+    <div id="player">
+      <div id="error-msg"></div>
+      <div class="controls-row">
+        <button class="ctrl-btn" id="restart-btn" title="Restart section">&#8635;</button>
+        <button class="ctrl-btn" id="back-btn" title="Back 10s">&#171;</button>
+        <button id="play-btn" title="Play / Pause">&#9654;</button>
+        <button class="ctrl-btn" id="fwd-btn" title="Forward 10s">&#187;</button>
+        <button class="ctrl-btn" id="close-btn" title="Open new file">&#8635; File</button>
+        <button class="ctrl-btn" id="pronun-btn" title="Pronunciation dictionary">Aa</button>
+      </div>
+
+      <div class="settings-row">
+        <div class="setting">
+          <label>VOICE</label>
+          <button class="voice-picker-btn" id="voice-picker-btn">
+            <span id="voice-picker-label">Loading…</span>
+            <span class="voice-picker-caret">▾</span>
+          </button>
+        </div>
+        <div class="setting">
+          <label>SPEED</label>
+          <input type="range" id="rate-slider" min="0.5" max="2" step="0.1" value="1">
+          <span class="setting-val" id="rate-val">1.0×</span>
+        </div>
+        <div class="setting">
+          <label>PITCH</label>
+          <input type="range" id="pitch-slider" min="0.5" max="1.8" step="0.1" value="1">
+          <span class="setting-val" id="pitch-val">1.0</span>
+        </div>
+      </div>
+
+      <div id="status-bar">ready</div>
+    </div>
+  </div>
+</div>
+
+<!-- Pronunciation Dictionary Modal -->
+<div id="pronun-modal" class="voice-modal hidden">
+  <div class="voice-modal-inner pronun-inner">
+    <div class="voice-modal-header">
+      <span class="voice-modal-title">Pronunciation Dictionary</span>
+      <button class="voice-modal-close" id="pronun-modal-close">✕</button>
+    </div>
+    <div class="voice-modal-hint">Words are replaced phonetically before TTS reads them. Case-insensitive.</div>
+
+    <div class="pronun-add-row">
+      <input class="pronun-input" id="pronun-word" placeholder="Word or phrase" spellcheck="false">
+      <span class="pronun-arrow">→</span>
+      <input class="pronun-input" id="pronun-phonetic" placeholder="Say it as…" spellcheck="false">
+      <button class="pronun-add-btn" id="pronun-add-btn">Add</button>
+    </div>
+
+    <div id="pronun-list"></div>
+    <div class="pronun-empty" id="pronun-empty">No substitutions yet. Add words above.</div>
+  </div>
+</div>
+
+<!-- Voice Picker Modal -->
+<div id="voice-modal" class="voice-modal hidden">
+  <div class="voice-modal-inner">
+    <div class="voice-modal-header">
+      <span class="voice-modal-title">Choose a Voice</span>
+      <button class="voice-modal-close" id="voice-modal-close">✕</button>
+    </div>
+    <div class="voice-modal-hint">Tap ▶ to preview · tap a row to select</div>
+    <div id="voice-list"></div>
+  </div>
+</div>
+
+<div id="loading"><div class="spinner"></div><p id="loading-msg">Parsing file…</p></div>
+
+<script>
+// ─── State ───────────────────────────────────────────────────────────────────
+const state = {
+  chapters: [],      // [{title, text}]
+  currentChapter: 0,
+  words: [],
+  wordIndex: 0,
+  isPlaying: false,
+  utterance: null,
+};
+
+// ─── Refs ─────────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const dropZone      = $('drop-zone');
+const readerView    = $('reader-view');
+const textContent   = $('text-content');
+const chapterSelect = $('chapter-select');
+const prevCh        = $('prev-ch');
+const nextCh        = $('next-ch');
+const playBtn       = $('play-btn');
+const restartBtn    = $('restart-btn');
+const backBtn       = $('back-btn');
+const fwdBtn        = $('fwd-btn');
+const closeBtn      = $('close-btn');
+const voiceSelect   = $('voice-select');
+const rateSlider    = $('rate-slider');
+const pitchSlider   = $('pitch-slider');
+const rateVal       = $('rate-val');
+const pitchVal      = $('pitch-val');
+const progressFill  = $('progress-fill');
+const statusBar     = $('status-bar');
+const fileMeta      = $('file-meta');
+const loadingEl     = $('loading');
+const loadingMsg    = $('loading-msg');
+const errorMsg      = $('error-msg');
+
+// ─── PDF.js config ─────────────────────────────────────────────────────────
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+// ─── Voice picker ────────────────────────────────────────────────────────────
+let allVoices = [];
+let selectedVoiceURI = localStorage.getItem('lectio_voice') || '';
+let previewingURI = null;
+
+// macOS Premium voices (require download in System Settings)
+const MACOS_PREMIUM = [
+  'ava','allison','samantha','tom','alex','susan','victoria',
+  'karen','daniel','moira','tessa','rishi','fiona','veena','lee','wayne'
+];
+// Other strong hints of neural/enhanced quality
+const ENHANCED_HINTS = [
+  'enhanced','premium','neural','natural','wavenet','studio',
+  'siri','jenny','aria','guy','ryan','eric','michelle','roger','steffan'
+];
+
+const isChromeMac = /Chrome/.test(navigator.userAgent) && /Mac/.test(navigator.userAgent)
+                  && !/Edg|OPR|Brave/.test(navigator.userAgent);
+
+function scoreVoice(voice) {
+  const n = voice.name.toLowerCase();
+  // Tier 3: macOS Premium (downloaded) — best quality
+  if (MACOS_PREMIUM.some(h => n.includes(h)) && voice.localService) return 3;
+  // Tier 2: enhanced/neural hints
+  if (ENHANCED_HINTS.some(h => n.includes(h))) return 2;
+  // Tier 1: any local voice (better than Google TTS in Chrome)
+  if (voice.localService) return 1;
+  return 0;
+}
+
+function loadVoices() {
+  const raw = speechSynthesis.getVoices();
+  allVoices = raw.filter(v => v.lang.startsWith('en'));
+  if (!allVoices.length) return;
+
+  // Sort by tier desc, then alphabetical
+  allVoices.sort((a, b) => {
+    const sd = scoreVoice(b) - scoreVoice(a);
+    return sd !== 0 ? sd : a.name.localeCompare(b.name);
+  });
+
+  // Restore saved, or auto-select best
+  const saved = allVoices.find(v => v.voiceURI === selectedVoiceURI);
+  if (!saved) selectedVoiceURI = allVoices[0]?.voiceURI || '';
+
+  // Show Chrome/Mac tip once
+  if (isChromeMac && !localStorage.getItem('lectio_chrome_tip')) {
+    showChromeTip();
+  }
+
+  updatePickerLabel();
+  renderVoiceList();
+}
+
+function showChromeTip() {
+  localStorage.setItem('lectio_chrome_tip', '1');
+  const tip = document.createElement('div');
+  tip.id = 'chrome-tip';
+  tip.innerHTML = `
+    <span>💡 Chrome uses its own robotic voices on Mac. For much better audio, open this file in <strong>Safari</strong> — it uses your downloaded macOS voices.</span>
+    <button onclick="this.parentElement.remove()">✕</button>
+  `;
+  tip.style.cssText = `
+    display:flex; align-items:center; justify-content:space-between; gap:12px;
+    background:rgba(212,149,42,.1); border:1px solid var(--amber-dim);
+    border-radius:var(--radius); padding:10px 14px; margin:10px 0 0;
+    font-family:'DM Mono',monospace; font-size:.67rem; color:var(--text-mid); line-height:1.5;
+  `;
+  tip.querySelector('button').style.cssText = `
+    background:none; border:none; color:var(--text-dim); cursor:pointer; font-size:.8rem; flex-shrink:0;
+  `;
+  $('player').insertBefore(tip, $('status-bar'));
+}
+
+
+function updatePickerLabel() {
+  const v = allVoices.find(v => v.voiceURI === selectedVoiceURI);
+  $('voice-picker-label').textContent = v ? shortName(v.name) : 'Choose voice';
+}
+
+function shortName(name) {
+  // Strip vendor prefixes like "Google US English" → "US English"
+  return name.replace(/^(Google|Microsoft|Apple)\s+/i, '').replace(/\s*\(.*\)/, '').trim();
+}
+
+function renderVoiceList() {
+  const list = $('voice-list');
+  list.innerHTML = '';
+
+  const t3 = allVoices.filter(v => scoreVoice(v) === 3);
+  const t2 = allVoices.filter(v => scoreVoice(v) === 2);
+  const t1 = allVoices.filter(v => scoreVoice(v) === 1);
+  const t0 = allVoices.filter(v => scoreVoice(v) === 0);
+
+  function renderGroup(voices, label) {
+    if (!voices.length) return;
+    const gl = document.createElement('div');
+    gl.className = 'voice-group-label';
+    gl.textContent = label;
+    list.appendChild(gl);
+    voices.forEach(v => list.appendChild(makeVoiceRow(v)));
+  }
+
+  renderGroup(t3, '✦ macOS Premium');
+  renderGroup(t2, '✦ Enhanced');
+  renderGroup(t1, 'Local');
+  renderGroup(t0, 'Network (lower quality)');
+}
+
+function makeVoiceRow(voice) {
+  const row = document.createElement('div');
+  row.className = 'voice-row' + (voice.voiceURI === selectedVoiceURI ? ' selected' : '');
+  row.dataset.uri = voice.voiceURI;
+
+  const tier = scoreVoice(voice);
+  const badgeText  = tier === 3 ? 'PREMIUM' : tier === 2 ? 'ENHANCED' : tier === 1 ? 'LOCAL' : 'NETWORK';
+  const badgeClass = tier >= 2 ? 'badge-premium' : 'badge-standard';
+
+  row.innerHTML = `
+    <button class="voice-preview-btn" data-uri="${voice.voiceURI}" title="Preview">▶</button>
+    <div class="voice-info">
+      <div class="voice-name">${shortName(voice.name)}</div>
+      <div class="voice-meta">${voice.name} · ${voice.lang}</div>
+    </div>
+    <span class="voice-badge ${badgeClass}">${badgeText}</span>
+  `;
+
+  row.addEventListener('click', (e) => {
+    if (e.target.closest('.voice-preview-btn')) return;
+    selectVoice(voice.voiceURI);
+    closeVoiceModal();
+  });
+
+  row.querySelector('.voice-preview-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    previewVoice(voice, row.querySelector('.voice-preview-btn'));
+  });
+
+  return row;
+}
+
+function selectVoice(uri) {
+  selectedVoiceURI = uri;
+  localStorage.setItem('lectio_voice', uri);
+  updatePickerLabel();
+  // Re-render to update selected state
+  renderVoiceList();
+  // If currently playing, restart with new voice
+  if (state.isPlaying) {
+    const wi = state.wordIndex;
+    startSpeech(wi);
+  }
+}
+
+function previewVoice(voice, btn) {
+  speechSynthesis.cancel();
+  if (previewingURI === voice.voiceURI) {
+    previewingURI = null;
+    btn.textContent = '▶';
+    btn.classList.remove('previewing');
+    return;
+  }
+  // Reset all preview buttons
+  document.querySelectorAll('.voice-preview-btn').forEach(b => {
+    b.textContent = '▶'; b.classList.remove('previewing');
+  });
+  previewingURI = voice.voiceURI;
+  btn.textContent = '■';
+  btn.classList.add('previewing');
+
+  const utt = new SpeechSynthesisUtterance('The quick brown fox jumps over the lazy dog.');
+  utt.voice = voice;
+  utt.rate = parseFloat(rateSlider.value);
+  utt.pitch = parseFloat(pitchSlider.value);
+  utt.onend = utt.onerror = () => {
+    previewingURI = null;
+    btn.textContent = '▶';
+    btn.classList.remove('previewing');
+  };
+  speechSynthesis.speak(utt);
+}
+
+function openVoiceModal() {
+  renderVoiceList();
+  $('voice-modal').classList.remove('hidden');
+  // Scroll selected into view
+  setTimeout(() => {
+    const sel = $('voice-list').querySelector('.selected');
+    if (sel) sel.scrollIntoView({ block: 'center' });
+  }, 50);
+}
+
+function closeVoiceModal() {
+  speechSynthesis.cancel();
+  previewingURI = null;
+  $('voice-modal').classList.add('hidden');
+}
+
+$('voice-picker-btn').addEventListener('click', () => {
+  unlockTTS();
+  openVoiceModal();
+});
+$('voice-modal-close').addEventListener('click', closeVoiceModal);
+$('voice-modal').addEventListener('click', (e) => {
+  if (e.target === $('voice-modal')) closeVoiceModal();
+});
+
+loadVoices();
+speechSynthesis.onvoiceschanged = loadVoices;
+
+// Helper: get currently selected voice object
+function getSelectedVoice() {
+  return allVoices.find(v => v.voiceURI === selectedVoiceURI) || allVoices[0] || null;
+}
+
+
+// ─── File input ──────────────────────────────────────────────────────────────
+$('file-input').addEventListener('change', e => handleFile(e.target.files[0]));
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('drag-over');
+  handleFile(e.dataTransfer.files[0]);
+});
+dropZone.addEventListener('click', e => {
+  if (e.target.tagName !== 'BUTTON') $('file-input').click();
+});
+
+async function handleFile(file) {
+  if (!file) return;
+  showLoading('Parsing file…');
+  try {
+    const ext = file.name.split('.').pop().toLowerCase();
+    if (ext === 'pdf') {
+      await parsePDF(file);
+    } else if (ext === 'epub') {
+      await parseEPUB(file);
+    } else if (ext === 'docx') {
+      await parseDOCX(file);
+    } else {
+      throw new Error('Unsupported format. Please use PDF, EPUB, or DOCX.');
+    }
+    fileMeta.textContent = file.name;
+    populateChapters();
+    showReader();
+  } catch (err) {
+    hideLoading();
+    showError(err.message);
+  }
+}
+
+// ─── PDF parsing ─────────────────────────────────────────────────────────────
+async function parsePDF(file) {
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  const numPages = pdf.numPages;
+
+  state.chapters = [];
+  const CHUNK = 10; // group pages into chapters of 10
+
+  for (let start = 1; start <= numPages; start += CHUNK) {
+    const end = Math.min(start + CHUNK - 1, numPages);
+    let text = '';
+    for (let p = start; p <= end; p++) {
+      loadingMsg.textContent = `Reading page ${p} of ${numPages}…`;
+      const page = await pdf.getPage(p);
+      const content = await page.getTextContent();
+      text += content.items.map(i => i.str).join(' ') + '\n\n';
+    }
+    state.chapters.push({
+      title: numPages <= CHUNK ? 'Full Document' : `Pages ${start}–${end}`,
+      text: text.trim()
+    });
+  }
+}
+
+// ─── EPUB parsing ────────────────────────────────────────────────────────────
+async function parseEPUB(file) {
+  const buf = await file.arrayBuffer();
+  const zip = await JSZip.loadAsync(buf);
+
+  // Read OPF to get spine order
+  let opfPath = '';
+  const containerXml = await zip.file('META-INF/container.xml')?.async('text');
+  if (containerXml) {
+    const m = containerXml.match(/full-path="([^"]+\.opf)"/);
+    if (m) opfPath = m[1];
+  }
+  if (!opfPath) throw new Error('Could not locate OPF file in EPUB.');
+
+  const opfDir = opfPath.includes('/') ? opfPath.substring(0, opfPath.lastIndexOf('/') + 1) : '';
+  const opfText = await zip.file(opfPath).async('text');
+  const parser = new DOMParser();
+  const opfDoc = parser.parseFromString(opfText, 'application/xml');
+
+  // Build manifest map
+  const manifest = {};
+  opfDoc.querySelectorAll('manifest item').forEach(item => {
+    manifest[item.getAttribute('id')] = {
+      href: opfDir + item.getAttribute('href'),
+      type: item.getAttribute('media-type'),
+    };
+  });
+
+  // Get spine
+  const spineItems = [];
+  opfDoc.querySelectorAll('spine itemref').forEach(ref => {
+    const id = ref.getAttribute('idref');
+    if (manifest[id]) spineItems.push(manifest[id]);
+  });
+
+  // Get TOC titles
+  const tocTitles = {};
+  const ncxEntry = Object.values(manifest).find(v => v.type === 'application/x-dtbncx+xml');
+  if (ncxEntry) {
+    const ncxText = await zip.file(ncxEntry.href)?.async('text');
+    if (ncxText) {
+      const ncxDoc = parser.parseFromString(ncxText, 'application/xml');
+      ncxDoc.querySelectorAll('navPoint').forEach(np => {
+        const src = np.querySelector('content')?.getAttribute('src')?.split('#')[0];
+        const label = np.querySelector('navLabel text')?.textContent?.trim();
+        if (src && label) tocTitles[opfDir + src] = label;
+      });
+    }
+  }
+
+  // Extract text per spine item
+  state.chapters = [];
+  for (let i = 0; i < spineItems.length; i++) {
+    const item = spineItems[i];
+    loadingMsg.textContent = `Extracting chapter ${i + 1} of ${spineItems.length}…`;
+    const htmlText = await zip.file(item.href)?.async('text');
+    if (!htmlText) continue;
+    const doc = parser.parseFromString(htmlText, 'text/html');
+    // Remove scripts, styles, nav
+    doc.querySelectorAll('script, style, nav').forEach(el => el.remove());
+    const text = (doc.body?.innerText || doc.body?.textContent || '').replace(/\s+/g, ' ').trim();
+    if (text.length < 40) continue; // skip near-empty chapters
+    const title = tocTitles[item.href] || doc.querySelector('title')?.textContent || `Chapter ${state.chapters.length + 1}`;
+    state.chapters.push({ title, text });
+  }
+
+  if (!state.chapters.length) throw new Error('No readable content found in EPUB.');
+}
+
+// ─── DOCX parsing ─────────────────────────────────────────────────────────────
+async function parseDOCX(file) {
+  const buf = await file.arrayBuffer();
+  const result = await mammoth.extractRawText({ arrayBuffer: buf });
+  const fullText = result.value.trim();
+  if (!fullText) throw new Error('No readable text found in DOCX.');
+
+  // Split into ~800-word chunks as "chapters"
+  const words = fullText.split(/\s+/);
+  const CHUNK = 800;
+  state.chapters = [];
+
+  for (let i = 0; i < words.length; i += CHUNK) {
+    const slice = words.slice(i, i + CHUNK).join(' ');
+    const sectionNum = Math.floor(i / CHUNK) + 1;
+    const totalSections = Math.ceil(words.length / CHUNK);
+    state.chapters.push({
+      title: totalSections === 1 ? 'Full Document' : `Section ${sectionNum} of ${totalSections}`,
+      text: slice,
+    });
+  }
+}
+
+
+function populateChapters() {
+  chapterSelect.innerHTML = '';
+  state.chapters.forEach((ch, i) => {
+    const opt = document.createElement('option');
+    opt.value = i;
+    opt.textContent = ch.title;
+    chapterSelect.appendChild(opt);
+  });
+  loadChapter(0);
+}
+
+function loadChapter(index) {
+  stopSpeech();
+  state.currentChapter = index;
+  chapterSelect.value = index;
+  prevCh.disabled = index === 0;
+  nextCh.disabled = index === state.chapters.length - 1;
+
+  const text = state.chapters[index].text;
+  state.words = tokenizeWords(text);
+  state.wordIndex = 0;
+
+  renderText();
+  progressFill.style.width = '0%';
+  setStatus('ready');
+  playBtn.innerHTML = '&#9654;';
+  state.isPlaying = false;
+}
+
+// Tokenize text into words (preserving punctuation) for highlight
+function tokenizeWords(text) {
+  return text.match(/\S+|\s+/g) || [];
+}
+
+function renderText(highlightIdx = -1) {
+  const words = state.words;
+  let html = '';
+  let wordCount = 0;
+  for (let i = 0; i < words.length; i++) {
+    if (/\S/.test(words[i])) {
+      if (wordCount === highlightIdx) {
+        html += `<mark class="speaking-word">${escHtml(words[i])}</mark>`;
+      } else {
+        html += escHtml(words[i]);
+      }
+      wordCount++;
+    } else {
+      html += words[i]; // whitespace
+    }
+  }
+  textContent.innerHTML = html;
+}
+
+function escHtml(str) {
+  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ─── Pronunciation dictionary ─────────────────────────────────────────────────
+// Seeded with common Vietnamese, Teochew, Malay terms
+const DEFAULT_DICT = [
+  { word: 'Teochew',      phonetic: 'Tyoh-joo' },
+  { word: 'Pulau Bidong', phonetic: 'Poo-lau Bee-dong' },
+  { word: 'Pulau',        phonetic: 'Poo-lau' },
+  { word: 'Bidong',       phonetic: 'Bee-dong' },
+  { word: 'Kuala Terengganu', phonetic: 'Kwah-la Tuh-reng-ah-noo' },
+  { word: 'Terengganu',   phonetic: 'Tuh-reng-ah-noo' },
+  { word: 'Cholon',       phonetic: 'Choh-lon' },
+  { word: 'Hội An',       phonetic: 'Hoy An' },
+  { word: 'Đà Nẵng',     phonetic: 'Dah Nang' },
+  { word: 'Sài Gòn',     phonetic: 'Sai Gon' },
+  { word: 'Ăn cơm chưa', phonetic: 'Un Gum Choo-ah' },
+  { word: 'huí',          phonetic: 'hway' },
+  { word: 'nhường',       phonetic: 'nyuong' },
+  { word: 'Pho',          phonetic: 'fuh' },
+  { word: 'Banh mi',      phonetic: 'Bahn mee' },
+];
+
+let pronunDict = [];
+
+function loadPronunDict() {
+  try {
+    const saved = localStorage.getItem('lectio_pronun');
+    pronunDict = saved ? JSON.parse(saved) : [...DEFAULT_DICT];
+  } catch { pronunDict = [...DEFAULT_DICT]; }
+  renderPronunList();
+}
+
+function savePronunDict() {
+  localStorage.setItem('lectio_pronun', JSON.stringify(pronunDict));
+}
+
+function applyPronunciation(text) {
+  let result = text;
+  // Sort by word length desc so longer phrases match before substrings
+  const sorted = [...pronunDict].sort((a, b) => b.word.length - a.word.length);
+  for (const { word, phonetic } of sorted) {
+    if (!word.trim()) continue;
+    const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(`\\b${escaped}\\b`, 'gi');
+    result = result.replace(re, phonetic);
+  }
+  return result;
+}
+
+function renderPronunList() {
+  const list = $('pronun-list');
+  const empty = $('pronun-empty');
+  list.innerHTML = '';
+  if (!pronunDict.length) {
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+  pronunDict.forEach((entry, i) => {
+    const row = document.createElement('div');
+    row.className = 'pronun-row';
+    row.innerHTML = `
+      <span class="pronun-row-word">${escHtml(entry.word)}</span>
+      <span class="pronun-row-arrow">→</span>
+      <span class="pronun-row-phonetic">${escHtml(entry.phonetic)}</span>
+      <button class="pronun-del-btn" data-idx="${i}" title="Remove">✕</button>
+    `;
+    row.querySelector('.pronun-del-btn').addEventListener('click', () => {
+      pronunDict.splice(i, 1);
+      savePronunDict();
+      renderPronunList();
+    });
+    list.appendChild(row);
+  });
+}
+
+$('pronun-btn').addEventListener('click', () => {
+  $('pronun-modal').classList.remove('hidden');
+});
+$('pronun-modal-close').addEventListener('click', () => {
+  $('pronun-modal').classList.add('hidden');
+});
+$('pronun-modal').addEventListener('click', e => {
+  if (e.target === $('pronun-modal')) $('pronun-modal').classList.add('hidden');
+});
+
+$('pronun-add-btn').addEventListener('click', addPronunEntry);
+$('pronun-phonetic').addEventListener('keydown', e => { if (e.key === 'Enter') addPronunEntry(); });
+
+function addPronunEntry() {
+  const word     = $('pronun-word').value.trim();
+  const phonetic = $('pronun-phonetic').value.trim();
+  if (!word || !phonetic) return;
+  // Replace if exists
+  const existing = pronunDict.findIndex(e => e.word.toLowerCase() === word.toLowerCase());
+  if (existing >= 0) pronunDict[existing].phonetic = phonetic;
+  else pronunDict.unshift({ word, phonetic });
+  savePronunDict();
+  renderPronunList();
+  $('pronun-word').value = '';
+  $('pronun-phonetic').value = '';
+  $('pronun-word').focus();
+}
+
+loadPronunDict();
+
+// ─── Speech synthesis ─────────────────────────────────────────────────────────
+function getSpeakableText() {
+  const raw = state.chapters[state.currentChapter].text;
+  return applyPronunciation(raw);
+}
+
+function startSpeech(fromWordIndex = 0) {
+  speechSynthesis.cancel();
+
+  const fullText = getSpeakableText();
+  const wordsOnly = state.words.filter(w => /\S/.test(w));
+  const fromChar = getCharOffset(state.words, fromWordIndex);
+  const textToSpeak = fullText.slice(fromChar);
+
+  if (!textToSpeak.trim()) {
+    setStatus('done');
+    return;
+  }
+
+  // iOS: chunk into ~200-word pieces — iOS Safari silently drops long utterances
+  const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+  const chunkWords = isIOS ? 200 : 999999;
+  const allWords = textToSpeak.split(/\s+/);
+
+  const chunks = [];
+  for (let i = 0; i < allWords.length; i += chunkWords) {
+    chunks.push(allWords.slice(i, i + chunkWords).join(' '));
+  }
+
+  let chunkIdx = 0;
+  let localWordIdx = fromWordIndex;
+
+  function speakChunk() {
+    if (chunkIdx >= chunks.length) return;
+    const utt = new SpeechSynthesisUtterance(chunks[chunkIdx]);
+    const voices = speechSynthesis.getVoices().filter(v => v.lang.startsWith('en'));
+    const selectedVoice = getSelectedVoice();
+    if (selectedVoice) utt.voice = selectedVoice;
+    else if (voices.length) utt.voice = voices[0];
+    utt.rate  = parseFloat(rateSlider.value);
+    utt.pitch = parseFloat(pitchSlider.value);
+
+    utt.onboundary = (e) => {
+      if (e.name === 'word') {
+        renderText(localWordIdx);
+        scrollToHighlight();
+        const progress = ((localWordIdx + 1) / wordsOnly.length) * 100;
+        progressFill.style.width = Math.min(progress, 100) + '%';
+        state.wordIndex = localWordIdx;
+        localWordIdx++;
+      }
+    };
+
+    utt.onend = () => {
+      chunkIdx++;
+      if (chunkIdx < chunks.length && state.isPlaying) {
+        speakChunk();
+      } else {
+        stopKeepalive();
+        state.isPlaying = false;
+        playBtn.innerHTML = '&#9654;';
+        progressFill.style.width = '100%';
+        setStatus('done');
+        renderText(-1);
+        if (state.currentChapter < state.chapters.length - 1) {
+          setTimeout(() => loadChapter(state.currentChapter + 1), 800);
+        }
+      }
+    };
+
+    utt.onerror = (e) => {
+      stopKeepalive();
+      if (e.error !== 'interrupted' && e.error !== 'canceled') {
+        setStatus('error: ' + e.error);
+        state.isPlaying = false;
+        playBtn.innerHTML = '&#9654;';
+      }
+    };
+
+    state.utterance = utt;
+    speechSynthesis.speak(utt);
+  }
+
+  speakChunk();
+  startKeepalive();
+  state.isPlaying = true;
+  playBtn.innerHTML = '&#9646;&#9646;';
+  setStatus('playing — ' + state.chapters[state.currentChapter].title);
+}
+
+function stopSpeech() {
+  speechSynthesis.cancel();
+  stopKeepalive();
+  state.isPlaying = false;
+  state.utterance = null;
+  playBtn.innerHTML = '&#9654;';
+}
+
+function getCharOffset(tokens, targetWordIdx) {
+  let charOffset = 0;
+  let wordCount = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    if (/\S/.test(tokens[i])) {
+      if (wordCount === targetWordIdx) return charOffset;
+      wordCount++;
+    }
+    charOffset += tokens[i].length;
+  }
+  return charOffset;
+}
+
+function scrollToHighlight() {
+  const mark = textContent.querySelector('.speaking-word');
+  if (mark) mark.scrollIntoView({ block: 'center', behavior: 'smooth' });
+}
+
+// ─── TTS unlock — must happen synchronously inside a user gesture ─────────────
+let ttsUnlocked = false;
+function unlockTTS() {
+  if (ttsUnlocked) return;
+  // iOS requires a non-empty utterance spoken synchronously in the gesture
+  const u = new SpeechSynthesisUtterance(' ');
+  u.volume = 0;
+  u.rate = 10; // speak as fast as possible so it's inaudible
+  speechSynthesis.speak(u);
+  ttsUnlocked = true;
+}
+
+// ─── iOS: resume after screen wakes / tab returns to foreground ───────────────
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && state.isPlaying && !speechSynthesis.speaking) {
+    const wi = state.wordIndex;
+    setTimeout(() => startSpeech(wi), 300);
+  }
+});
+
+// ─── Chrome keepalive: Chrome stops TTS after ~15s unless we ping it ──────────
+let keepaliveTimer = null;
+function startKeepalive() {
+  stopKeepalive();
+  keepaliveTimer = setInterval(() => {
+    if (speechSynthesis.speaking && !speechSynthesis.paused) {
+      speechSynthesis.pause();
+      speechSynthesis.resume();
+    }
+  }, 10000);
+}
+function stopKeepalive() {
+  if (keepaliveTimer) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
+}
+
+// ─── Controls ─────────────────────────────────────────────────────────────────
+playBtn.addEventListener('click', () => {
+  unlockTTS();
+  if (!state.chapters.length) return;
+
+  if (state.isPlaying) {
+    speechSynthesis.pause();
+    stopKeepalive();
+    state.isPlaying = false;
+    playBtn.innerHTML = '&#9654;';
+    setStatus('paused');
+  } else {
+    // Only resume if truly mid-utterance and paused (not after cancel)
+    if (speechSynthesis.paused && speechSynthesis.speaking) {
+      speechSynthesis.resume();
+      startKeepalive();
+      state.isPlaying = true;
+      playBtn.innerHTML = '&#9646;&#9646;';
+      setStatus('playing — ' + state.chapters[state.currentChapter].title);
+    } else {
+      startSpeech(state.wordIndex);
+    }
+  }
+});
+
+restartBtn.addEventListener('click', () => {
+  state.wordIndex = 0;
+  renderText(-1);
+  if (state.isPlaying) startSpeech(0);
+  else { stopSpeech(); progressFill.style.width = '0%'; setStatus('ready'); }
+});
+
+backBtn.addEventListener('click', () => {
+  const newIdx = Math.max(0, state.wordIndex - 30);
+  state.wordIndex = newIdx;
+  if (state.isPlaying) startSpeech(newIdx);
+  else renderText(-1);
+});
+
+fwdBtn.addEventListener('click', () => {
+  const wordsOnly = state.words.filter(w => /\S/.test(w));
+  const newIdx = Math.min(wordsOnly.length - 1, state.wordIndex + 30);
+  state.wordIndex = newIdx;
+  if (state.isPlaying) startSpeech(newIdx);
+  else renderText(-1);
+});
+
+closeBtn.addEventListener('click', () => {
+  stopSpeech();
+  readerView.style.display = 'none';
+  dropZone.style.display = 'flex';
+  state.chapters = [];
+  fileMeta.textContent = 'Drop a PDF or EPUB to begin';
+  $('file-input').value = '';
+});
+
+chapterSelect.addEventListener('change', () => loadChapter(parseInt(chapterSelect.value)));
+prevCh.addEventListener('click', () => loadChapter(state.currentChapter - 1));
+nextCh.addEventListener('click', () => loadChapter(state.currentChapter + 1));
+
+rateSlider.addEventListener('input', () => {
+  rateVal.textContent = parseFloat(rateSlider.value).toFixed(1) + '×';
+  if (state.isPlaying) { const wi = state.wordIndex; startSpeech(wi); }
+});
+
+pitchSlider.addEventListener('input', () => {
+  pitchVal.textContent = parseFloat(pitchSlider.value).toFixed(1);
+  if (state.isPlaying) { const wi = state.wordIndex; startSpeech(wi); }
+});
+
+// ─── UI helpers ───────────────────────────────────────────────────────────────
+function showReader() {
+  hideLoading();
+  dropZone.style.display = 'none';
+  readerView.style.display = 'flex';
+}
+
+function showLoading(msg) {
+  loadingMsg.textContent = msg;
+  loadingEl.classList.add('active');
+}
+
+function hideLoading() {
+  loadingEl.classList.remove('active');
+}
+
+function showError(msg) {
+  errorMsg.style.display = 'block';
+  errorMsg.textContent = '⚠ ' + msg;
+  setTimeout(() => errorMsg.style.display = 'none', 6000);
+}
+
+function setStatus(msg) {
+  statusBar.textContent = msg;
+}
+
+// ─── Service Worker registration ──────────────────────────────────────────────
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').catch(() => {});
+  });
+}
+</script>
+</body>
+</html>
