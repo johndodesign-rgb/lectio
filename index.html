@@ -1357,7 +1357,7 @@ function startSpeech(fromWordIndex = 0) {
           scrollToHighlight();
           const progress = ((capturedIdx + 1) / wordsOnly.length) * 100;
           progressFill.style.width = Math.min(progress, 100) + '%';
-        }, 120);
+        }, 250);
         state.wordIndex = localWordIdx;
         localWordIdx++;
       }
