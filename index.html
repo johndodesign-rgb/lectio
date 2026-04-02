@@ -758,6 +758,28 @@
     transition: color .15s, border-color .15s;
   }
   .resume-no:hover { color: var(--text); border-color: var(--text-dim); }
+
+  /* ── Azure indicator ── */
+  .azure-badge {
+    font-family: 'DM Mono', monospace;
+    font-size: .55rem;
+    padding: 2px 6px;
+    border-radius: 3px;
+    background: rgba(82,130,255,.15);
+    color: #7aa4ff;
+    flex-shrink: 0;
+    letter-spacing: .05em;
+  }
+
+  #azure-voice-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 240px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
 </style>
 </head>
 <body>
@@ -802,6 +824,7 @@
         <button class="ctrl-btn" id="fwd-btn" title="Forward 10s">&#187;</button>
         <button class="ctrl-btn" id="close-btn" title="Open new file">&#8635; File</button>
         <button class="ctrl-btn" id="pronun-btn" title="Pronunciation dictionary">Aa</button>
+        <button class="ctrl-btn" id="azure-btn" title="Azure TTS settings">⚙</button>
       </div>
 
       <div class="settings-row">
@@ -825,6 +848,36 @@
       </div>
 
       <div id="status-bar">ready</div>
+    </div>
+  </div>
+</div>
+
+<!-- Azure TTS Settings Modal -->
+<div id="azure-modal" class="voice-modal hidden">
+  <div class="voice-modal-inner pronun-inner">
+    <div class="voice-modal-header">
+      <span class="voice-modal-title">Azure TTS</span>
+      <button class="voice-modal-close" id="azure-modal-close">✕</button>
+    </div>
+    <div class="voice-modal-hint">Your key is stored locally and never sent anywhere except Microsoft.</div>
+    <div class="pronun-add-row" style="flex-direction:column; align-items:stretch; gap:10px;">
+      <div style="display:flex; flex-direction:column; gap:6px;">
+        <label style="font-family:'DM Mono',monospace; font-size:.65rem; color:var(--text-dim); letter-spacing:.06em;">API KEY</label>
+        <input class="pronun-input" id="azure-key-input" type="password" placeholder="Paste your Azure Speech key" spellcheck="false" autocomplete="off">
+      </div>
+      <div style="display:flex; flex-direction:column; gap:6px;">
+        <label style="font-family:'DM Mono',monospace; font-size:.65rem; color:var(--text-dim); letter-spacing:.06em;">REGION</label>
+        <input class="pronun-input" id="azure-region-input" type="text" placeholder="e.g. eastus" spellcheck="false" autocomplete="off" value="eastus">
+      </div>
+      <div style="display:flex; gap:8px; margin-top:4px;">
+        <button class="pronun-add-btn" id="azure-save-btn">Save & Enable</button>
+        <button class="resume-no" id="azure-clear-btn">Clear Key</button>
+      </div>
+      <div id="azure-status-msg" style="font-family:'DM Mono',monospace; font-size:.68rem; color:var(--amber); display:none;"></div>
+    </div>
+    <div style="padding: 12px 16px 8px;">
+      <div class="voice-group-label" style="padding:8px 0 10px;">AZURE VOICES</div>
+      <div id="azure-voice-list"></div>
     </div>
   </div>
 </div>
@@ -1216,7 +1269,327 @@ function escHtml(str) {
   return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
-// ─── Pronunciation dictionary ─────────────────────────────────────────────────
+// ─── Azure TTS ────────────────────────────────────────────────────────────────
+const AZURE_VOICES = [
+  { name: 'Ryan',    locale: 'en-GB', id: 'en-GB-RyanNeural',    desc: 'British Male' },
+  { name: 'Sonia',   locale: 'en-GB', id: 'en-GB-SoniaNeural',   desc: 'British Female' },
+  { name: 'Libby',   locale: 'en-GB', id: 'en-GB-LibbyNeural',   desc: 'British Female' },
+  { name: 'Jenny',   locale: 'en-US', id: 'en-US-JennyNeural',   desc: 'US Female' },
+  { name: 'Aria',    locale: 'en-US', id: 'en-US-AriaNeural',    desc: 'US Female, Expressive' },
+  { name: 'Guy',     locale: 'en-US', id: 'en-US-GuyNeural',     desc: 'US Male' },
+  { name: 'Davis',   locale: 'en-US', id: 'en-US-DavisNeural',   desc: 'US Male' },
+  { name: 'Tony',    locale: 'en-US', id: 'en-US-TonyNeural',    desc: 'US Male' },
+  { name: 'Nancy',   locale: 'en-US', id: 'en-US-NancyNeural',   desc: 'US Female' },
+  { name: 'Steffan', locale: 'en-GB', id: 'en-GB-SteffanNeural', desc: 'Welsh Male' },
+  { name: 'Natasha', locale: 'en-AU', id: 'en-AU-NatashaNeural', desc: 'Australian Female' },
+  { name: 'William', locale: 'en-AU', id: 'en-AU-WilliamNeural', desc: 'Australian Male' },
+];
+
+let azureKey    = localStorage.getItem('lectio_azure_key')    || '';
+let azureRegion = localStorage.getItem('lectio_azure_region') || 'eastus';
+let azureVoice  = localStorage.getItem('lectio_azure_voice')  || 'en-GB-RyanNeural';
+let azureToken  = null;
+let azureTokenExpiry = 0;
+
+function azureEnabled() { return !!azureKey; }
+
+// Get or refresh Azure access token (tokens last 10 min)
+async function getAzureToken() {
+  if (azureToken && Date.now() < azureTokenExpiry) return azureToken;
+  const res = await fetch(
+    `https://${azureRegion}.api.cognitive.microsoft.com/sts/v1.0/issueToken`,
+    { method: 'POST', headers: { 'Ocp-Apim-Subscription-Key': azureKey } }
+  );
+  if (!res.ok) throw new Error('Azure auth failed — check your API key and region.');
+  azureToken = await res.text();
+  azureTokenExpiry = Date.now() + 9 * 60 * 1000; // refresh before 10min expiry
+  return azureToken;
+}
+
+// Synthesize text to audio blob via Azure REST API
+async function azureSynthesize(text, voice) {
+  const token = await getAzureToken();
+  const rate  = parseFloat(rateSlider.value);
+  const ssml  = `
+    <speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US">
+      <voice name="${voice}">
+        <prosody rate="${rate}" pitch="+0%">
+          ${text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+        </prosody>
+      </voice>
+    </speak>`.trim();
+
+  const res = await fetch(
+    `https://${azureRegion}.tts.speech.microsoft.com/cognitiveservices/v1`,
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/ssml+xml',
+        'X-Microsoft-OutputFormat': 'audio-24khz-48kbitrate-mono-mp3',
+      },
+      body: ssml,
+    }
+  );
+  if (!res.ok) throw new Error(`Azure TTS error: ${res.status}`);
+  return await res.blob();
+}
+
+// Azure playback state
+let azureAudio    = null;
+let azureChunks   = [];
+let azureChunkIdx = 0;
+let azureWordTimers = [];
+
+function stopAzure() {
+  if (azureAudio) { azureAudio.pause(); azureAudio.src = ''; azureAudio = null; }
+  azureWordTimers.forEach(t => clearTimeout(t));
+  azureWordTimers = [];
+  azureChunks   = [];
+  azureChunkIdx = 0;
+}
+
+// Estimate word timing for highlight (Azure REST doesn't give boundary events)
+function scheduleWordHighlights(words, startWordIdx, durationMs) {
+  azureWordTimers.forEach(t => clearTimeout(t));
+  azureWordTimers = [];
+  if (!words.length) return;
+  const msPerWord = durationMs / words.length;
+  words.forEach((_, i) => {
+    const t = setTimeout(() => {
+      const idx = startWordIdx + i;
+      renderText(idx);
+      scrollToHighlight();
+      state.wordIndex = idx;
+      const wordsOnly = state.words.filter(w => /\S/.test(w));
+      const progress = ((idx + 1) / wordsOnly.length) * 100;
+      progressFill.style.width = Math.min(progress, 100) + '%';
+    }, i * msPerWord);
+    azureWordTimers.push(t);
+  });
+}
+
+async function startAzureSpeech(fromWordIndex = 0) {
+  stopAzure();
+  stopKeepalive();
+
+  const fullText  = getSpeakableText();
+  const wordsOnly = state.words.filter(w => /\S/.test(w));
+  const fromChar  = getCharOffset(state.words, fromWordIndex);
+  const textToSpeak = fullText.slice(fromChar);
+  if (!textToSpeak.trim()) { setStatus('done'); return; }
+
+  // Split into ~300 word chunks for Azure
+  const words  = textToSpeak.split(/\s+/).filter(Boolean);
+  const CHUNK  = 300;
+  azureChunks  = [];
+  let wIdx = 0;
+  for (let i = 0; i < words.length; i += CHUNK) {
+    const slice = words.slice(i, i + CHUNK);
+    azureChunks.push({ text: slice.join(' '), wordCount: slice.length, startWordIdx: fromWordIndex + wIdx });
+    wIdx += slice.length;
+  }
+
+  state.isPlaying = true;
+  playBtn.innerHTML = '&#9646;&#9646;';
+  setStatus('playing — ' + state.chapters[state.currentChapter].title);
+  acquireWakeLock();
+
+  await playAzureChunk();
+}
+
+async function playAzureChunk() {
+  if (azureChunkIdx >= azureChunks.length || !state.isPlaying) return;
+
+  const chunk = azureChunks[azureChunkIdx];
+  setStatus(`loading… — ${state.chapters[state.currentChapter].title}`);
+
+  try {
+    const blob = await azureSynthesize(chunk.text, azureVoice);
+    if (!state.isPlaying) return; // stopped while fetching
+
+    const url  = URL.createObjectURL(blob);
+    azureAudio = new Audio(url);
+
+    azureAudio.addEventListener('loadedmetadata', () => {
+      const dur = azureAudio.duration * 1000;
+      scheduleWordHighlights(
+        chunk.text.split(/\s+/).filter(Boolean),
+        chunk.startWordIdx,
+        dur
+      );
+      setStatus('playing — ' + state.chapters[state.currentChapter].title);
+    });
+
+    azureAudio.addEventListener('ended', () => {
+      URL.revokeObjectURL(url);
+      azureChunkIdx++;
+      if (azureChunkIdx < azureChunks.length && state.isPlaying) {
+        playAzureChunk();
+      } else {
+        // Chapter done — auto-advance
+        releaseWakeLock();
+        renderText(-1);
+        progressFill.style.width = '100%';
+        const next = state.currentChapter + 1;
+        if (next < state.chapters.length) {
+          setTimeout(() => {
+            state.currentChapter = next;
+            chapterSelect.value  = next;
+            prevCh.disabled = next === 0;
+            nextCh.disabled = next >= state.chapters.length - 1;
+            state.words     = tokenizeWords(state.chapters[next].text);
+            state.wordIndex = 0;
+            renderText();
+            progressFill.style.width = '0%';
+            savePositionNow();
+            azureChunkIdx = 0;
+            startAzureSpeech(0);
+          }, 600);
+        } else {
+          state.isPlaying = false;
+          playBtn.innerHTML = '&#9654;';
+          setStatus('done');
+        }
+      }
+    });
+
+    azureAudio.addEventListener('error', () => {
+      setStatus('audio error — try again');
+      state.isPlaying = false;
+      playBtn.innerHTML = '&#9654;';
+    });
+
+    azureAudio.playbackRate = 1; // rate already applied in SSML
+    await azureAudio.play();
+
+  } catch (err) {
+    setStatus('⚠ ' + err.message);
+    state.isPlaying = false;
+    playBtn.innerHTML = '&#9654;';
+    releaseWakeLock();
+  }
+}
+
+// ─── Azure settings modal ─────────────────────────────────────────────────────
+function renderAzureVoiceList() {
+  const list = $('azure-voice-list');
+  list.innerHTML = '';
+  AZURE_VOICES.forEach(v => {
+    const row = document.createElement('div');
+    row.className = 'voice-row' + (v.id === azureVoice ? ' selected' : '');
+    row.innerHTML = `
+      <button class="voice-preview-btn" title="Preview">▶</button>
+      <div class="voice-info">
+        <div class="voice-name">${v.name}</div>
+        <div class="voice-meta">${v.desc} · ${v.locale}</div>
+      </div>
+      <span class="voice-badge azure-badge">AZURE</span>
+    `;
+    row.addEventListener('click', e => {
+      if (e.target.closest('.voice-preview-btn')) return;
+      azureVoice = v.id;
+      localStorage.setItem('lectio_azure_voice', azureVoice);
+      updatePickerLabel();
+      renderAzureVoiceList();
+      if (state.isPlaying) { const wi = state.wordIndex; startAzureSpeech(wi); }
+    });
+    row.querySelector('.voice-preview-btn').addEventListener('click', async e => {
+      e.stopPropagation();
+      if (!azureEnabled()) return;
+      const btn = e.currentTarget;
+      btn.textContent = '…';
+      try {
+        const blob = await azureSynthesize('The quick brown fox jumps over the lazy dog.', v.id);
+        const audio = new Audio(URL.createObjectURL(blob));
+        audio.play();
+        audio.onended = () => btn.textContent = '▶';
+      } catch { btn.textContent = '▶'; }
+    });
+    list.appendChild(row);
+  });
+}
+
+$('azure-btn').addEventListener('click', () => {
+  $('azure-key-input').value    = azureKey ? '••••••••••••••••' : '';
+  $('azure-region-input').value = azureRegion;
+  renderAzureVoiceList();
+  $('azure-modal').classList.remove('hidden');
+});
+$('azure-modal-close').addEventListener('click', () => $('azure-modal').classList.add('hidden'));
+$('azure-modal').addEventListener('click', e => { if (e.target === $('azure-modal')) $('azure-modal').classList.add('hidden'); });
+
+$('azure-save-btn').addEventListener('click', async () => {
+  const keyInput = $('azure-key-input').value.trim();
+  const region   = $('azure-region-input').value.trim() || 'eastus';
+  if (!keyInput || keyInput.includes('•')) {
+    // Key unchanged, just save region
+    azureRegion = region;
+    localStorage.setItem('lectio_azure_region', region);
+    showAzureStatus('✓ Settings saved');
+    return;
+  }
+  azureKey    = keyInput;
+  azureRegion = region;
+  azureToken  = null; // force refresh
+  localStorage.setItem('lectio_azure_key',    azureKey);
+  localStorage.setItem('lectio_azure_region', azureRegion);
+  showAzureStatus('Testing connection…');
+  try {
+    await getAzureToken();
+    showAzureStatus('✓ Connected — Azure TTS enabled');
+    updatePickerLabel();
+  } catch (err) {
+    showAzureStatus('⚠ ' + err.message);
+    azureKey = '';
+    localStorage.removeItem('lectio_azure_key');
+  }
+});
+
+$('azure-clear-btn').addEventListener('click', () => {
+  azureKey = ''; azureToken = null;
+  localStorage.removeItem('lectio_azure_key');
+  $('azure-key-input').value = '';
+  showAzureStatus('Key cleared — using browser TTS');
+  updatePickerLabel();
+});
+
+function showAzureStatus(msg) {
+  const el = $('azure-status-msg');
+  el.textContent = msg;
+  el.style.display = 'block';
+  setTimeout(() => el.style.display = 'none', 4000);
+}
+
+// Update voice picker label to show Azure or browser voice
+function updatePickerLabel() {
+  if (azureEnabled()) {
+    const v = AZURE_VOICES.find(v => v.id === azureVoice);
+    $('voice-picker-label').textContent = v ? `Azure · ${v.name}` : 'Azure TTS';
+  } else {
+    const v = allVoices.find(v => v.voiceURI === selectedVoiceURI);
+    $('voice-picker-label').textContent = v ? shortName(v.name) : 'Choose voice';
+  }
+}
+
+// Override voice picker button — show Azure modal if enabled, else browser picker
+$('voice-picker-btn').removeEventListener('click', openVoiceModal);
+$('voice-picker-btn').addEventListener('click', () => {
+  unlockTTS();
+  if (azureEnabled()) {
+    $('azure-key-input').value    = azureKey ? '••••••••••••••••' : '';
+    $('azure-region-input').value = azureRegion;
+    renderAzureVoiceList();
+    $('azure-modal').classList.remove('hidden');
+  } else {
+    openVoiceModal();
+  }
+});
+
+// Init Azure label
+if (azureEnabled()) updatePickerLabel();
+
+
 // Seeded with common Vietnamese, Teochew, Malay terms
 const DEFAULT_DICT = [
   { word: 'Teochew',      phonetic: 'Tyoh-joo' },
@@ -1352,6 +1725,15 @@ function getSpeakableText() {
 }
 
 function startSpeech(fromWordIndex = 0) {
+  if (azureEnabled()) {
+    azureChunkIdx = 0;
+    startAzureSpeech(fromWordIndex);
+    return;
+  }
+  browserStartSpeech(fromWordIndex);
+}
+
+function browserStartSpeech(fromWordIndex = 0) {
   speechSynthesis.cancel();
 
   const fullText = getSpeakableText();
@@ -1459,6 +1841,7 @@ function startSpeech(fromWordIndex = 0) {
 }
 
 function stopSpeech() {
+  if (azureEnabled()) stopAzure();
   speechSynthesis.cancel();
   stopKeepalive();
   releaseWakeLock();
@@ -1499,9 +1882,13 @@ function unlockTTS() {
 
 // ─── iOS: resume after screen wakes / tab returns to foreground ───────────────
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && state.isPlaying && !speechSynthesis.speaking) {
-    const wi = state.wordIndex;
-    setTimeout(() => startSpeech(wi), 300);
+  if (!document.hidden && state.isPlaying) {
+    if (azureEnabled()) {
+      if (azureAudio && azureAudio.paused) azureAudio.play();
+    } else if (!speechSynthesis.speaking) {
+      const wi = state.wordIndex;
+      setTimeout(() => startSpeech(wi), 300);
+    }
   }
 });
 
@@ -1526,21 +1913,42 @@ playBtn.addEventListener('click', () => {
   if (!state.chapters.length) return;
 
   if (state.isPlaying) {
-    speechSynthesis.pause();
-    stopKeepalive();
+    // Pause
+    if (azureEnabled() && azureAudio) {
+      azureAudio.pause();
+      azureWordTimers.forEach(t => clearTimeout(t));
+      azureWordTimers = [];
+    } else {
+      speechSynthesis.pause();
+      stopKeepalive();
+    }
+    releaseWakeLock();
     state.isPlaying = false;
     playBtn.innerHTML = '&#9654;';
     setStatus('paused');
   } else {
-    // Only resume if truly mid-utterance and paused (not after cancel)
-    if (speechSynthesis.paused && speechSynthesis.speaking) {
-      speechSynthesis.resume();
-      startKeepalive();
-      state.isPlaying = true;
-      playBtn.innerHTML = '&#9646;&#9646;';
-      setStatus('playing — ' + state.chapters[state.currentChapter].title);
+    // Resume or start
+    if (azureEnabled()) {
+      if (azureAudio && azureAudio.paused && azureAudio.currentTime > 0) {
+        azureAudio.play();
+        acquireWakeLock();
+        state.isPlaying = true;
+        playBtn.innerHTML = '&#9646;&#9646;';
+        setStatus('playing — ' + state.chapters[state.currentChapter].title);
+      } else {
+        startSpeech(state.wordIndex);
+      }
     } else {
-      startSpeech(state.wordIndex);
+      if (speechSynthesis.paused && speechSynthesis.speaking) {
+        speechSynthesis.resume();
+        startKeepalive();
+        acquireWakeLock();
+        state.isPlaying = true;
+        playBtn.innerHTML = '&#9646;&#9646;';
+        setStatus('playing — ' + state.chapters[state.currentChapter].title);
+      } else {
+        startSpeech(state.wordIndex);
+      }
     }
   }
 });
