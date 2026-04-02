@@ -778,7 +778,7 @@
           <input type="range" id="rate-slider" min="0.5" max="2" step="0.1" value="1">
           <span class="setting-val" id="rate-val">1.0×</span>
         </div>
-        <div class="setting">
+        <div class="setting" style="display:none">
           <label>PITCH</label>
           <input type="range" id="pitch-slider" min="0.5" max="1.8" step="0.1" value="1">
           <span class="setting-val" id="pitch-val">1.0</span>
@@ -828,12 +828,13 @@
 <script>
 // ─── State ───────────────────────────────────────────────────────────────────
 const state = {
-  chapters: [],      // [{title, text}]
+  chapters: [],
   currentChapter: 0,
   words: [],
   wordIndex: 0,
   isPlaying: false,
   utterance: null,
+  parseComplete: false,
 };
 
 // ─── Refs ─────────────────────────────────────────────────────────────────────
@@ -1095,124 +1096,6 @@ dropZone.addEventListener('click', e => {
   if (e.target.tagName !== 'BUTTON') $('file-input').click();
 });
 
-async function handleFile(file) {
-  if (!file) return;
-  showLoading('Parsing file…');
-  try {
-    const ext = file.name.split('.').pop().toLowerCase();
-    if (ext === 'pdf') {
-      await parsePDF(file);
-    } else if (ext === 'epub') {
-      await parseEPUB(file);
-    } else if (ext === 'docx') {
-      await parseDOCX(file);
-    } else {
-      throw new Error('Unsupported format. Please use PDF, EPUB, or DOCX.');
-    }
-    fileMeta.textContent = file.name;
-    if (db) await saveFileToDB(file).catch(() => {});
-    populateChapters();
-    showReader();
-  } catch (err) {
-    hideLoading();
-    showError(err.message);
-  }
-}
-
-// ─── PDF parsing ─────────────────────────────────────────────────────────────
-async function parsePDF(file) {
-  const buf = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
-  const numPages = pdf.numPages;
-
-  state.chapters = [];
-  const CHUNK = 10; // group pages into chapters of 10
-
-  for (let start = 1; start <= numPages; start += CHUNK) {
-    const end = Math.min(start + CHUNK - 1, numPages);
-    let text = '';
-    for (let p = start; p <= end; p++) {
-      loadingMsg.textContent = `Reading page ${p} of ${numPages}…`;
-      const page = await pdf.getPage(p);
-      const content = await page.getTextContent();
-      text += content.items.map(i => i.str).join(' ') + '\n\n';
-    }
-    state.chapters.push({
-      title: numPages <= CHUNK ? 'Full Document' : `Pages ${start}–${end}`,
-      text: text.trim()
-    });
-  }
-}
-
-// ─── EPUB parsing ────────────────────────────────────────────────────────────
-async function parseEPUB(file) {
-  const buf = await file.arrayBuffer();
-  const zip = await JSZip.loadAsync(buf);
-
-  // Read OPF to get spine order
-  let opfPath = '';
-  const containerXml = await zip.file('META-INF/container.xml')?.async('text');
-  if (containerXml) {
-    const m = containerXml.match(/full-path="([^"]+\.opf)"/);
-    if (m) opfPath = m[1];
-  }
-  if (!opfPath) throw new Error('Could not locate OPF file in EPUB.');
-
-  const opfDir = opfPath.includes('/') ? opfPath.substring(0, opfPath.lastIndexOf('/') + 1) : '';
-  const opfText = await zip.file(opfPath).async('text');
-  const parser = new DOMParser();
-  const opfDoc = parser.parseFromString(opfText, 'application/xml');
-
-  // Build manifest map
-  const manifest = {};
-  opfDoc.querySelectorAll('manifest item').forEach(item => {
-    manifest[item.getAttribute('id')] = {
-      href: opfDir + item.getAttribute('href'),
-      type: item.getAttribute('media-type'),
-    };
-  });
-
-  // Get spine
-  const spineItems = [];
-  opfDoc.querySelectorAll('spine itemref').forEach(ref => {
-    const id = ref.getAttribute('idref');
-    if (manifest[id]) spineItems.push(manifest[id]);
-  });
-
-  // Get TOC titles
-  const tocTitles = {};
-  const ncxEntry = Object.values(manifest).find(v => v.type === 'application/x-dtbncx+xml');
-  if (ncxEntry) {
-    const ncxText = await zip.file(ncxEntry.href)?.async('text');
-    if (ncxText) {
-      const ncxDoc = parser.parseFromString(ncxText, 'application/xml');
-      ncxDoc.querySelectorAll('navPoint').forEach(np => {
-        const src = np.querySelector('content')?.getAttribute('src')?.split('#')[0];
-        const label = np.querySelector('navLabel text')?.textContent?.trim();
-        if (src && label) tocTitles[opfDir + src] = label;
-      });
-    }
-  }
-
-  // Extract text per spine item
-  state.chapters = [];
-  for (let i = 0; i < spineItems.length; i++) {
-    const item = spineItems[i];
-    loadingMsg.textContent = `Extracting chapter ${i + 1} of ${spineItems.length}…`;
-    const htmlText = await zip.file(item.href)?.async('text');
-    if (!htmlText) continue;
-    const doc = parser.parseFromString(htmlText, 'text/html');
-    // Remove scripts, styles, nav
-    doc.querySelectorAll('script, style, nav').forEach(el => el.remove());
-    const text = (doc.body?.innerText || doc.body?.textContent || '').replace(/\s+/g, ' ').trim();
-    if (text.length < 40) continue; // skip near-empty chapters
-    const title = tocTitles[item.href] || doc.querySelector('title')?.textContent || `Chapter ${state.chapters.length + 1}`;
-    state.chapters.push({ title, text });
-  }
-
-  if (!state.chapters.length) throw new Error('No readable content found in EPUB.');
-}
-
 // ─── DOCX parsing ─────────────────────────────────────────────────────────────
 async function parseDOCX(file) {
   const buf = await file.arrayBuffer();
@@ -1237,7 +1120,7 @@ async function parseDOCX(file) {
 }
 
 
-function populateChapters() {
+function populateChapters(autoLoad = true) {
   chapterSelect.innerHTML = '';
   state.chapters.forEach((ch, i) => {
     const opt = document.createElement('option');
@@ -1245,7 +1128,7 @@ function populateChapters() {
     opt.textContent = ch.title;
     chapterSelect.appendChild(opt);
   });
-  loadChapter(0);
+  if (autoLoad) loadChapter(0);
 }
 
 function loadChapter(index) {
@@ -1399,9 +1282,34 @@ function addPronunEntry() {
 loadPronunDict();
 
 // ─── Speech synthesis ─────────────────────────────────────────────────────────
+function cleanText(text) {
+  return text
+    // Remove standalone punctuation clusters used as scene breaks (e.g. *** --- ~~~ ___)
+    .replace(/^\s*([*\-~_=#]+)\s*$/gm, ' ')
+    // Remove inline asterisks/underscores used for bold/italic markdown
+    .replace(/\*{1,3}([^*]+)\*{1,3}/g, '$1')
+    .replace(/_{1,3}([^_]+)_{1,3}/g, '$1')
+    // Remove leftover standalone symbols that TTS would read aloud
+    .replace(/\*/g, '')
+    .replace(/~{2,}/g, '')
+    .replace(/#{1,6}\s/g, '') // markdown headers
+    // Collapse multiple blank lines into one pause
+    .replace(/\n{3,}/g, '\n\n')
+    // ── Prosody nudges ──
+    // Questions: add a brief pause before ? to encourage rising inflection
+    .replace(/(\w)\?/g, '$1,?')
+    // Exclamations: add comma before ! for a beat of emphasis
+    .replace(/(\w)!/g, '$1,!')
+    // Ellipses: ensure they get a proper pause
+    .replace(/\.{3}/g, '... ')
+    // Em dashes: replace with comma-pause for natural break
+    .replace(/—/g, ', ')
+    .replace(/–/g, ', ');
+}
+
 function getSpeakableText() {
   const raw = state.chapters[state.currentChapter].text;
-  return applyPronunciation(raw);
+  return applyPronunciation(cleanText(raw));
 }
 
 function startSpeech(fromWordIndex = 0) {
@@ -1442,10 +1350,14 @@ function startSpeech(fromWordIndex = 0) {
 
     utt.onboundary = (e) => {
       if (e.name === 'word') {
-        renderText(localWordIdx);
-        scrollToHighlight();
-        const progress = ((localWordIdx + 1) / wordsOnly.length) * 100;
-        progressFill.style.width = Math.min(progress, 100) + '%';
+        const capturedIdx = localWordIdx;
+        // Small delay to sync highlight with actual audio output
+        setTimeout(() => {
+          renderText(capturedIdx);
+          scrollToHighlight();
+          const progress = ((capturedIdx + 1) / wordsOnly.length) * 100;
+          progressFill.style.width = Math.min(progress, 100) + '%';
+        }, 120);
         state.wordIndex = localWordIdx;
         localWordIdx++;
       }
@@ -1457,6 +1369,7 @@ function startSpeech(fromWordIndex = 0) {
         speakChunk();
       } else {
         stopKeepalive();
+        releaseWakeLock();
         state.isPlaying = false;
         playBtn.innerHTML = '&#9654;';
         progressFill.style.width = '100%';
@@ -1483,6 +1396,7 @@ function startSpeech(fromWordIndex = 0) {
 
   speakChunk();
   startKeepalive();
+  acquireWakeLock();
   state.isPlaying = true;
   playBtn.innerHTML = '&#9646;&#9646;';
   setStatus('playing — ' + state.chapters[state.currentChapter].title);
@@ -1491,6 +1405,7 @@ function startSpeech(fromWordIndex = 0) {
 function stopSpeech() {
   speechSynthesis.cancel();
   stopKeepalive();
+  releaseWakeLock();
   state.isPlaying = false;
   state.utterance = null;
   playBtn.innerHTML = '&#9654;';
@@ -1601,13 +1516,10 @@ closeBtn.addEventListener('click', () => {
   readerView.style.display = 'none';
   dropZone.style.display = 'flex';
   state.chapters = [];
+  state.parseComplete = false;
   fileMeta.textContent = 'Drop a PDF or EPUB to begin';
   $('file-input').value = '';
-  // Clear stored session
-  if (db) {
-    dbPut('files',    { id: 'current', name: '', data: new ArrayBuffer(0) }).catch(() => {});
-    dbPut('position', { id: 'current', chapter: 0, wordIndex: 0 }).catch(() => {});
-  }
+  clearSession();
 });
 
 chapterSelect.addEventListener('change', () => { loadChapter(parseInt(chapterSelect.value)); savePositionNow(); });
@@ -1675,7 +1587,7 @@ if ('serviceWorker' in navigator) {
 
 // ─── IndexedDB persistence ────────────────────────────────────────────────────
 const DB_NAME = 'lectio-db';
-const DB_VER  = 1;
+const DB_VER  = 2; // bumped to add 'chapters' store
 let db = null;
 
 function openDB() {
@@ -1688,6 +1600,10 @@ function openDB() {
       }
       if (!d.objectStoreNames.contains('position')) {
         d.createObjectStore('position', { keyPath: 'id' });
+      }
+      // New: store parsed chapters directly so we never re-parse
+      if (!d.objectStoreNames.contains('chapters')) {
+        d.createObjectStore('chapters', { keyPath: 'id' });
       }
     };
     req.onsuccess = e => { db = e.target.result; resolve(db); };
@@ -1713,12 +1629,13 @@ function dbGet(store, key) {
   });
 }
 
-async function saveFileToDB(file) {
-  const buf = await file.arrayBuffer();
-  await dbPut('files', { id: 'current', name: file.name, type: file.type, data: buf });
+async function saveParsedChapters() {
+  if (!db) return;
+  await dbPut('chapters', { id: 'current', chapters: state.chapters });
 }
 
 async function savePosition() {
+  if (!db) return;
   await dbPut('position', {
     id: 'current',
     chapter: state.currentChapter,
@@ -1726,27 +1643,245 @@ async function savePosition() {
   });
 }
 
-// Auto-save position every 5 seconds while reading
+// Auto-save position every 5 seconds
 setInterval(() => {
   if (state.chapters.length && db) savePosition().catch(() => {});
 }, 5000);
 
-// Also save when chapter changes
 function savePositionNow() {
   if (state.chapters.length && db) savePosition().catch(() => {});
 }
 
+// ─── Wake Lock — prevent screen sleep during playback ─────────────────────────
+let wakeLock = null;
+
+async function acquireWakeLock() {
+  if (!('wakeLock' in navigator)) return;
+  try {
+    wakeLock = await navigator.wakeLock.request('screen');
+    wakeLock.addEventListener('release', () => { wakeLock = null; });
+  } catch (e) { /* not available or denied, silently ignore */ }
+}
+
+function releaseWakeLock() {
+  if (wakeLock) { wakeLock.release(); wakeLock = null; }
+}
+
+// Re-acquire wake lock if page becomes visible again (e.g. screen wakes)
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState === 'visible' && state.isPlaying) {
+    await acquireWakeLock();
+    // Also resume TTS if it was interrupted
+    if (!speechSynthesis.speaking) {
+      const wi = state.wordIndex;
+      setTimeout(() => startSpeech(wi), 300);
+    }
+  }
+});
+
+// ─── Lazy file parsing ────────────────────────────────────────────────────────
+// Replaced synchronous parsers with lazy versions that yield first chapters fast
+
+async function handleFile(file) {
+  if (!file) return;
+  showLoading('Opening book…');
+  try {
+    const ext = file.name.split('.').pop().toLowerCase();
+    state.chapters = [];
+    state.parseComplete = false;
+
+    if (ext === 'pdf') {
+      await lazyParsePDF(file);
+    } else if (ext === 'epub') {
+      await lazyParseEPUB(file);
+    } else if (ext === 'docx') {
+      await parseDOCX(file); // DOCX is fast enough to parse fully
+      state.parseComplete = true;
+    } else {
+      throw new Error('Unsupported format. Please use PDF, EPUB, or DOCX.');
+    }
+
+    fileMeta.textContent = file.name;
+    // Save filename for resume prompt (not raw bytes anymore)
+    if (db) await dbPut('files', { id: 'current', name: file.name, type: file.type, data: null });
+
+  } catch (err) {
+    hideLoading();
+    showError(err.message);
+  }
+}
+
+// PDF: parse first chunk, show reader, parse rest in background
+async function lazyParsePDF(file) {
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  const numPages = pdf.numPages;
+  const CHUNK = 10;
+
+  // Parse first chunk immediately
+  const firstEnd = Math.min(CHUNK, numPages);
+  let text = '';
+  for (let p = 1; p <= firstEnd; p++) {
+    loadingMsg.textContent = `Reading page ${p} of ${numPages}…`;
+    const page = await pdf.getPage(p);
+    const content = await page.getTextContent();
+    text += content.items.map(i => i.str).join(' ') + '\n\n';
+  }
+  state.chapters.push({
+    title: numPages <= CHUNK ? 'Full Document' : `Pages 1–${firstEnd}`,
+    text: text.trim()
+  });
+
+  // Show reader immediately with first chunk
+  populateChapters(false);
+  showReader();
+
+  // Parse remaining chunks in background
+  for (let start = CHUNK + 1; start <= numPages; start += CHUNK) {
+    const end = Math.min(start + CHUNK - 1, numPages);
+    let chunkText = '';
+    for (let p = start; p <= end; p++) {
+      const page = await pdf.getPage(p);
+      const content = await page.getTextContent();
+      chunkText += content.items.map(i => i.str).join(' ') + '\n\n';
+    }
+    state.chapters.push({
+      title: `Pages ${start}–${end}`,
+      text: chunkText.trim()
+    });
+    addChapterToSelect(state.chapters.length - 1);
+    // Yield to browser between chunks
+    await new Promise(r => setTimeout(r, 0));
+  }
+
+  state.parseComplete = true;
+  saveParsedChapters().catch(() => {});
+  updateNavButtons();
+}
+
+// EPUB: parse first 2 chapters, show reader, parse rest in background
+async function lazyParseEPUB(file) {
+  const buf = await file.arrayBuffer();
+  const zip = await JSZip.loadAsync(buf);
+
+  // Read OPF
+  let opfPath = '';
+  const containerXml = await zip.file('META-INF/container.xml')?.async('text');
+  if (containerXml) {
+    const m = containerXml.match(/full-path="([^"]+\.opf)"/);
+    if (m) opfPath = m[1];
+  }
+  if (!opfPath) throw new Error('Could not locate OPF file in EPUB.');
+
+  const opfDir = opfPath.includes('/') ? opfPath.substring(0, opfPath.lastIndexOf('/') + 1) : '';
+  const opfText = await zip.file(opfPath).async('text');
+  const parser = new DOMParser();
+  const opfDoc = parser.parseFromString(opfText, 'application/xml');
+
+  const manifest = {};
+  opfDoc.querySelectorAll('manifest item').forEach(item => {
+    manifest[item.getAttribute('id')] = {
+      href: opfDir + item.getAttribute('href'),
+      type: item.getAttribute('media-type'),
+    };
+  });
+
+  const spineItems = [];
+  opfDoc.querySelectorAll('spine itemref').forEach(ref => {
+    const id = ref.getAttribute('idref');
+    if (manifest[id]) spineItems.push(manifest[id]);
+  });
+
+  const tocTitles = {};
+  const ncxEntry = Object.values(manifest).find(v => v.type === 'application/x-dtbncx+xml');
+  if (ncxEntry) {
+    const ncxText = await zip.file(ncxEntry.href)?.async('text');
+    if (ncxText) {
+      const ncxDoc = parser.parseFromString(ncxText, 'application/xml');
+      ncxDoc.querySelectorAll('navPoint').forEach(np => {
+        const src = np.querySelector('content')?.getAttribute('src')?.split('#')[0];
+        const label = np.querySelector('navLabel text')?.textContent?.trim();
+        if (src && label) tocTitles[opfDir + src] = label;
+      });
+    }
+  }
+
+  // Helper to parse one spine item
+  async function parseSpineItem(item) {
+    const htmlText = await zip.file(item.href)?.async('text');
+    if (!htmlText) return null;
+    const doc = parser.parseFromString(htmlText, 'text/html');
+    doc.querySelectorAll('script, style, nav').forEach(el => el.remove());
+    const text = (doc.body?.innerText || doc.body?.textContent || '').replace(/\s+/g, ' ').trim();
+    if (text.length < 40) return null;
+    const title = tocTitles[item.href] || doc.querySelector('title')?.textContent || null;
+    return { title, text };
+  }
+
+  // Parse first 2 substantive chapters
+  let loaded = 0;
+  let i = 0;
+  while (i < spineItems.length && loaded < 2) {
+    loadingMsg.textContent = `Opening chapter ${loaded + 1}…`;
+    const ch = await parseSpineItem(spineItems[i]);
+    if (ch) {
+      ch.title = ch.title || `Chapter ${state.chapters.length + 1}`;
+      state.chapters.push(ch);
+      loaded++;
+    }
+    i++;
+  }
+
+  if (!state.chapters.length) throw new Error('No readable content found in EPUB.');
+
+  // Show reader immediately
+  populateChapters(false);
+  showReader();
+
+  // Parse remaining in background
+  for (; i < spineItems.length; i++) {
+    const ch = await parseSpineItem(spineItems[i]);
+    if (ch) {
+      ch.title = ch.title || `Chapter ${state.chapters.length + 1}`;
+      state.chapters.push(ch);
+      addChapterToSelect(state.chapters.length - 1);
+    }
+    // Yield every 3 chapters so UI stays responsive
+    if (i % 3 === 0) await new Promise(r => setTimeout(r, 0));
+  }
+
+  state.parseComplete = true;
+  saveParsedChapters().catch(() => {});
+  updateNavButtons();
+}
+
+function addChapterToSelect(index) {
+  const opt = document.createElement('option');
+  opt.value = index;
+  opt.textContent = state.chapters[index].title;
+  chapterSelect.appendChild(opt);
+  updateNavButtons();
+}
+
+function updateNavButtons() {
+  prevCh.disabled = state.currentChapter === 0;
+  nextCh.disabled = state.currentChapter >= state.chapters.length - 1;
+}
+
+// ─── Restore session ──────────────────────────────────────────────────────────
 async function restoreSession() {
   try {
     await openDB();
     const saved = await dbGet('files', 'current');
-    if (!saved || !saved.data || saved.data.byteLength < 100) return;
+    if (!saved || !saved.name) return;
 
-    // Show resume prompt on drop zone instead of auto-loading
-    showResumePrompt(saved.name);
-
+    // Check if we have parsed chapters cached
+    const cached = await dbGet('chapters', 'current');
+    if (cached?.chapters?.length) {
+      showResumePrompt(saved.name);
+    }
   } catch (err) {
-    // Silently fail — show drop zone as normal
+    // Silently fail
   }
 }
 
@@ -1777,31 +1912,25 @@ function showResumePrompt(filename) {
 
   $('resume-no-btn').addEventListener('click', () => {
     prompt.remove();
-    if (db) {
-      dbPut('files',    { id: 'current', name: '', data: new ArrayBuffer(0) }).catch(() => {});
-      dbPut('position', { id: 'current', chapter: 0, wordIndex: 0 }).catch(() => {});
-    }
+    clearSession();
   });
 }
 
 async function doRestore() {
   try {
-    const saved = await dbGet('files', 'current');
-    if (!saved || !saved.data || saved.data.byteLength < 100) return;
+    showLoading('Loading your book…');
 
-    showLoading('Restoring your last book…');
-    const file = new File([saved.data], saved.name, { type: saved.type });
-    const ext  = saved.name.split('.').pop().toLowerCase();
+    // Load from cached parsed chapters — instant, no re-parsing
+    const cached = await dbGet('chapters', 'current');
+    const saved  = await dbGet('files',    'current');
+    if (!cached?.chapters?.length) { hideLoading(); return; }
 
-    if (ext === 'pdf')       await parsePDF(file);
-    else if (ext === 'epub') await parseEPUB(file);
-    else if (ext === 'docx') await parseDOCX(file);
-    else { hideLoading(); return; }
-
-    fileMeta.textContent = saved.name;
+    state.chapters = cached.chapters;
+    state.parseComplete = true;
+    fileMeta.textContent = saved?.name || 'Your book';
 
     const pos       = await dbGet('position', 'current');
-    const chapter   = pos?.chapter   || 0;
+    const chapter   = Math.min(pos?.chapter || 0, state.chapters.length - 1);
     const wordIndex = pos?.wordIndex || 0;
 
     chapterSelect.innerHTML = '';
@@ -1814,8 +1943,7 @@ async function doRestore() {
 
     state.currentChapter = chapter;
     chapterSelect.value  = chapter;
-    prevCh.disabled = chapter === 0;
-    nextCh.disabled = chapter === state.chapters.length - 1;
+    updateNavButtons();
     state.words     = tokenizeWords(state.chapters[chapter].text);
     state.wordIndex = Math.min(wordIndex, state.words.filter(w => /\S/.test(w)).length - 1);
 
@@ -1833,7 +1961,13 @@ async function doRestore() {
   }
 }
 
-// Kick off session restore on load
+function clearSession() {
+  if (!db) return;
+  dbPut('files',    { id: 'current', name: '', type: '', data: null }).catch(() => {});
+  dbPut('chapters', { id: 'current', chapters: [] }).catch(() => {});
+  dbPut('position', { id: 'current', chapter: 0, wordIndex: 0 }).catch(() => {});
+}
+
 restoreSession();
 </script>
 </body>
