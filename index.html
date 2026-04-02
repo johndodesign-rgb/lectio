@@ -225,20 +225,59 @@
     padding: 0 1px;
   }
 
+  /* Clickable word spans */
+  .word-span {
+    cursor: pointer;
+    border-radius: 2px;
+    transition: background .1s;
+  }
+  .word-span:hover { background: rgba(212,149,42,.1); }
+
   /* ── Progress bar ── */
   #progress-track {
-    height: 2px;
-    background: var(--border);
+    height: 12px;
+    background: transparent;
     position: relative;
     flex-shrink: 0;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+  }
+
+  #progress-track::before {
+    content: '';
+    position: absolute;
+    left: 0; right: 0;
+    height: 2px;
+    background: var(--border);
+    border-radius: 2px;
   }
 
   #progress-fill {
-    height: 100%;
+    height: 2px;
     background: var(--amber);
     width: 0%;
     transition: width .3s;
+    border-radius: 2px;
+    position: relative;
+    z-index: 1;
   }
+
+  #progress-fill::after {
+    content: '';
+    position: absolute;
+    right: -4px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 8px;
+    height: 8px;
+    background: var(--amber);
+    border-radius: 50%;
+    opacity: 0;
+    transition: opacity .15s;
+  }
+
+  #progress-track:hover #progress-fill::after { opacity: 1; }
 
   /* ── Player controls ── */
   #player {
@@ -1161,13 +1200,13 @@ function renderText(highlightIdx = -1) {
   for (let i = 0; i < words.length; i++) {
     if (/\S/.test(words[i])) {
       if (wordCount === highlightIdx) {
-        html += `<mark class="speaking-word">${escHtml(words[i])}</mark>`;
+        html += `<mark class="speaking-word word-span" data-widx="${wordCount}">${escHtml(words[i])}</mark>`;
       } else {
-        html += escHtml(words[i]);
+        html += `<span class="word-span" data-widx="${wordCount}">${escHtml(words[i])}</span>`;
       }
       wordCount++;
     } else {
-      html += words[i]; // whitespace
+      html += words[i]; // whitespace preserved as-is
     }
   }
   textContent.innerHTML = html;
@@ -1370,13 +1409,30 @@ function startSpeech(fromWordIndex = 0) {
       } else {
         stopKeepalive();
         releaseWakeLock();
-        state.isPlaying = false;
-        playBtn.innerHTML = '&#9654;';
         progressFill.style.width = '100%';
-        setStatus('done');
         renderText(-1);
-        if (state.currentChapter < state.chapters.length - 1) {
-          setTimeout(() => loadChapter(state.currentChapter + 1), 800);
+
+        const nextChapter = state.currentChapter + 1;
+        if (nextChapter < state.chapters.length) {
+          // Auto-advance and keep playing
+          setTimeout(() => {
+            state.currentChapter = nextChapter;
+            chapterSelect.value  = nextChapter;
+            prevCh.disabled = nextChapter === 0;
+            nextCh.disabled = nextChapter >= state.chapters.length - 1;
+            state.words     = tokenizeWords(state.chapters[nextChapter].text);
+            state.wordIndex = 0;
+            renderText();
+            progressFill.style.width = '0%';
+            setStatus('playing — ' + state.chapters[nextChapter].title);
+            savePositionNow();
+            startSpeech(0);
+          }, 600);
+        } else {
+          // End of book
+          state.isPlaying = false;
+          playBtn.innerHTML = '&#9654;';
+          setStatus('done');
         }
       }
     };
@@ -1525,6 +1581,33 @@ closeBtn.addEventListener('click', () => {
 chapterSelect.addEventListener('change', () => { loadChapter(parseInt(chapterSelect.value)); savePositionNow(); });
 prevCh.addEventListener('click', () => { loadChapter(state.currentChapter - 1); savePositionNow(); });
 nextCh.addEventListener('click', () => { loadChapter(state.currentChapter + 1); savePositionNow(); });
+
+// ─── Click to seek ────────────────────────────────────────────────────────────
+
+// Click a word to start reading from there
+textContent.addEventListener('click', e => {
+  const span = e.target.closest('.word-span');
+  if (!span) return;
+  const idx = parseInt(span.dataset.widx);
+  if (isNaN(idx)) return;
+  state.wordIndex = idx;
+  unlockTTS();
+  startSpeech(idx);
+});
+
+// Click/scrub the progress bar to jump to position
+$('progress-track').addEventListener('click', e => {
+  const rect = $('progress-track').getBoundingClientRect();
+  const pct  = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  const wordsOnly = state.words.filter(w => /\S/.test(w));
+  const idx = Math.floor(pct * wordsOnly.length);
+  state.wordIndex = idx;
+  progressFill.style.width = (pct * 100) + '%';
+  unlockTTS();
+  startSpeech(idx);
+  // Scroll text to rough position
+  textDisplay.scrollTop = textDisplay.scrollHeight * pct;
+});
 
 rateSlider.addEventListener('input', () => {
   rateVal.textContent = parseFloat(rateSlider.value).toFixed(1) + '×';
