@@ -1889,27 +1889,7 @@ function unlockTTS() {
   ttsUnlocked = true;
 }
 
-// ─── Resume after screen wakes / tab returns to foreground ───────────────────
-let resumeTimeout = null;
-let isResuming = false;
-document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && state.isPlaying && !isResuming) {
-    // Only act if audio has actually stopped
-    if (azureEnabled() && !azureSynthesizer) {
-      if (resumeTimeout) { clearTimeout(resumeTimeout); resumeTimeout = null; }
-      isResuming = true;
-      const wi = state.wordIndex;
-      resumeTimeout = setTimeout(() => {
-        resumeTimeout = null;
-        isResuming = false;
-        if (state.isPlaying) startSpeech(wi);
-      }, 500);
-    } else if (!azureEnabled() && !speechSynthesis.speaking) {
-      const wi = state.wordIndex;
-      setTimeout(() => startSpeech(wi), 300);
-    }
-  }
-});
+// ─── Resume after screen wakes — handled by wake lock preventing sleep ────────
 
 // ─── Chrome keepalive: Chrome stops TTS after ~15s unless we ping it ──────────
 let keepaliveTimer = null;
