@@ -1,4 +1,4 @@
-const CACHE = 'lectio-v2';
+const CACHE = 'lectio-v1';
 
 const PRECACHE = [
   './',
@@ -13,55 +13,45 @@ const PRECACHE = [
   'https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Mono:wght@300;400&display=swap',
 ];
 
+// Allow main thread to trigger immediate activation
 self.addEventListener('message', e => {
   if (e.data?.type === 'SKIP_WAITING') self.skipWaiting();
 });
 
+// Install: cache app shell
 self.addEventListener('install', e => {
   e.waitUntil(
-    caches.open(CACHE)
-      .then(cache => Promise.allSettled(PRECACHE.map(url => cache.add(url))))
-      .then(() => self.skipWaiting())
+    caches.open(CACHE).then(cache => {
+      // Cache what we can, skip failures (e.g. Google Fonts may vary)
+      return Promise.allSettled(PRECACHE.map(url => cache.add(url)));
+    }).then(() => self.skipWaiting())
   );
 });
 
+// Activate: clear old caches
 self.addEventListener('activate', e => {
   e.waitUntil(
-    caches.keys()
-      .then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
-      .then(() => self.clients.claim())
+    caches.keys().then(keys =>
+      Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
+    ).then(() => self.clients.claim())
   );
 });
 
+// Fetch: cache-first for app shell, network-first for everything else
 self.addEventListener('fetch', e => {
+  // Only handle GET requests
   if (e.request.method !== 'GET') return;
 
-  const url = new URL(e.request.url);
-  const accept = e.request.headers.get('accept') || '';
-  const isHTMLNavigation = e.request.mode === 'navigate' || accept.includes('text/html');
-
-  // Network-first for the app shell so installed PWAs pick up the latest version.
-  if (isHTMLNavigation || url.pathname.endsWith('/index.html') || url.pathname.endsWith('/sw.js')) {
-    e.respondWith(
-      fetch(e.request)
-        .then(response => {
-          if (response && response.ok) {
-            const clone = response.clone();
-            caches.open(CACHE).then(cache => cache.put(e.request, clone));
-          }
-          return response;
-        })
-        .catch(() => caches.match(e.request).then(r => r || caches.match('./index.html')))
-    );
-    return;
-  }
-
-  // Cache-first for static assets.
   e.respondWith(
     caches.match(e.request).then(cached => {
       if (cached) return cached;
       return fetch(e.request).then(response => {
-        if (response && response.ok) {
+        // Cache successful responses for CDN assets
+        if (response.ok && (
+          e.request.url.includes('cdnjs.cloudflare.com') ||
+          e.request.url.includes('fonts.googleapis.com') ||
+          e.request.url.includes('fonts.gstatic.com')
+        )) {
           const clone = response.clone();
           caches.open(CACHE).then(cache => cache.put(e.request, clone));
         }
