@@ -17,6 +17,8 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <!-- Mammoth for DOCX -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+<!-- Azure Speech SDK -->
+<script src="https://aka.ms/csspeech/jsbrowserpackageraw"></script>
 
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Mono:wght@300;400&display=swap');
@@ -1288,105 +1290,84 @@ const AZURE_VOICES = [
 let azureKey    = localStorage.getItem('lectio_azure_key')    || '';
 let azureRegion = localStorage.getItem('lectio_azure_region') || 'eastus';
 let azureVoice  = localStorage.getItem('lectio_azure_voice')  || 'en-GB-RyanNeural';
-let azureToken  = null;
-let azureTokenExpiry = 0;
 
 function azureEnabled() { return !!azureKey; }
 
-// Get or refresh Azure access token (tokens last 10 min)
-async function getAzureToken() {
-  if (azureToken && Date.now() < azureTokenExpiry) return azureToken;
-  const res = await fetch(
-    `https://${azureRegion}.api.cognitive.microsoft.com/sts/v1.0/issueToken`,
-    { method: 'POST', headers: { 'Ocp-Apim-Subscription-Key': azureKey } }
+// ─── SSML builder with real prosody ──────────────────────────────────────────
+function buildSSML(text, voice) {
+  const rate = parseFloat(rateSlider.value);
+
+  // Escape XML entities
+  let escaped = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
+  // Apply real SSML prosody for questions and exclamations
+  // Wrap sentences ending in ? with rising pitch
+  escaped = escaped.replace(
+    /([^.!?]+\?)/g,
+    '<prosody pitch="+12%" rate="-5%">$1</prosody>'
   );
-  if (!res.ok) throw new Error('Azure auth failed — check your API key and region.');
-  azureToken = await res.text();
-  azureTokenExpiry = Date.now() + 9 * 60 * 1000; // refresh before 10min expiry
-  return azureToken;
+  // Wrap sentences ending in ! with emphasis
+  escaped = escaped.replace(
+    /([^.!?]+!)/g,
+    '<prosody pitch="+8%" volume="+10%">$1</prosody>'
+  );
+
+  return `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="http://www.w3.org/2001/mstts" xml:lang="en-US">
+  <voice name="${voice}">
+    <mstts:express-as style="narration-professional">
+      <prosody rate="${((rate - 1) * 50).toFixed(0)}%">
+        ${escaped}
+      </prosody>
+    </mstts:express-as>
+  </voice>
+</speak>`;
 }
 
-// Synthesize text to audio blob via Azure REST API
-async function azureSynthesize(text, voice) {
-  const token = await getAzureToken();
-  const rate  = parseFloat(rateSlider.value);
-  const ssml  = `
-    <speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US">
-      <voice name="${voice}">
-        <prosody rate="${rate}" pitch="+0%">
-          ${text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
-        </prosody>
-      </voice>
-    </speak>`.trim();
-
-  const res = await fetch(
-    `https://${azureRegion}.tts.speech.microsoft.com/cognitiveservices/v1`,
-    {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/ssml+xml',
-        'X-Microsoft-OutputFormat': 'audio-24khz-48kbitrate-mono-mp3',
-      },
-      body: ssml,
-    }
-  );
-  if (!res.ok) throw new Error(`Azure TTS error: ${res.status}`);
-  return await res.blob();
-}
-
-// Azure playback state
-let azureAudio    = null;
-let azureChunks   = [];
-let azureChunkIdx = 0;
-let azureWordTimers = [];
+// ─── Azure SDK playback ───────────────────────────────────────────────────────
+let azureSynthesizer = null;
+let azureChunks      = [];
+let azureChunkIdx    = 0;
+let azureWordOffset  = 0; // global word index offset for current chunk
 
 function stopAzure() {
-  if (azureAudio) { azureAudio.pause(); azureAudio.src = ''; azureAudio = null; }
-  azureWordTimers.forEach(t => clearTimeout(t));
-  azureWordTimers = [];
-  azureChunks   = [];
-  azureChunkIdx = 0;
+  if (azureSynthesizer) {
+    try { azureSynthesizer.close(); } catch(e) {}
+    azureSynthesizer = null;
+  }
+  azureChunks    = [];
+  azureChunkIdx  = 0;
+  azureWordOffset = 0;
 }
 
-// Estimate word timing for highlight (Azure REST doesn't give boundary events)
-function scheduleWordHighlights(words, startWordIdx, durationMs) {
-  azureWordTimers.forEach(t => clearTimeout(t));
-  azureWordTimers = [];
-  if (!words.length) return;
-  const msPerWord = durationMs / words.length;
-  words.forEach((_, i) => {
-    const t = setTimeout(() => {
-      const idx = startWordIdx + i;
-      renderText(idx);
-      scrollToHighlight();
-      state.wordIndex = idx;
-      const wordsOnly = state.words.filter(w => /\S/.test(w));
-      const progress = ((idx + 1) / wordsOnly.length) * 100;
-      progressFill.style.width = Math.min(progress, 100) + '%';
-    }, i * msPerWord);
-    azureWordTimers.push(t);
-  });
+function createSynthesizer() {
+  const speechConfig = SpeechSDK.SpeechConfig.fromSubscription(azureKey, azureRegion);
+  speechConfig.speechSynthesisVoiceName = azureVoice;
+  speechConfig.speechSynthesisOutputFormat = SpeechSDK.SpeechSynthesisOutputFormat.Audio24Khz48KBitRateMonoMp3;
+  const audioConfig = SpeechSDK.AudioConfig.fromDefaultSpeakerOutput();
+  return new SpeechSDK.SpeechSynthesizer(speechConfig, audioConfig);
 }
 
 async function startAzureSpeech(fromWordIndex = 0) {
   stopAzure();
-  stopKeepalive();
 
-  const fullText  = getSpeakableText();
-  const wordsOnly = state.words.filter(w => /\S/.test(w));
-  const fromChar  = getCharOffset(state.words, fromWordIndex);
+  const fullText    = getSpeakableText();
+  const wordsOnly   = state.words.filter(w => /\S/.test(w));
+  const fromChar    = getCharOffset(state.words, fromWordIndex);
   const textToSpeak = fullText.slice(fromChar);
   if (!textToSpeak.trim()) { setStatus('done'); return; }
 
-  // Split into ~300 word chunks for Azure
-  const words  = textToSpeak.split(/\s+/).filter(Boolean);
-  const CHUNK  = 300;
-  azureChunks  = [];
+  // Split into ~200 word chunks
+  const words = textToSpeak.split(/\s+/).filter(Boolean);
+  const CHUNK = 200;
+  azureChunks = [];
   let wIdx = 0;
   for (let i = 0; i < words.length; i += CHUNK) {
     const slice = words.slice(i, i + CHUNK);
-    azureChunks.push({ text: slice.join(' '), wordCount: slice.length, startWordIdx: fromWordIndex + wIdx });
+    azureChunks.push({ text: slice.join(' '), startWordIdx: fromWordIndex + wIdx });
     wIdx += slice.length;
   }
 
@@ -1395,73 +1376,87 @@ async function startAzureSpeech(fromWordIndex = 0) {
   setStatus('playing — ' + state.chapters[state.currentChapter].title);
   acquireWakeLock();
 
-  await playAzureChunk();
+  await playNextAzureChunk();
 }
 
-async function playAzureChunk() {
+async function playNextAzureChunk() {
   if (azureChunkIdx >= azureChunks.length || !state.isPlaying) return;
 
   const chunk = azureChunks[azureChunkIdx];
-  setStatus(`loading… — ${state.chapters[state.currentChapter].title}`);
+  azureWordOffset = chunk.startWordIdx;
+  const wordsOnly = state.words.filter(w => /\S/.test(w));
 
   try {
-    const blob = await azureSynthesize(chunk.text, azureVoice);
-    if (!state.isPlaying) return; // stopped while fetching
+    azureSynthesizer = createSynthesizer();
+    const ssml = buildSSML(chunk.text, azureVoice);
 
-    const url  = URL.createObjectURL(blob);
-    azureAudio = new Audio(url);
+    // Word boundary event — real timestamps from Azure SDK
+    let localWordCount = 0;
+    azureSynthesizer.wordBoundary = (s, e) => {
+      if (!state.isPlaying) return;
+      const globalIdx = azureWordOffset + localWordCount;
+      localWordCount++;
 
-    azureAudio.addEventListener('loadedmetadata', () => {
-      const dur = azureAudio.duration * 1000;
-      scheduleWordHighlights(
-        chunk.text.split(/\s+/).filter(Boolean),
-        chunk.startWordIdx,
-        dur
-      );
-      setStatus('playing — ' + state.chapters[state.currentChapter].title);
-    });
+      // Delay matches audio latency
+      setTimeout(() => {
+        state.wordIndex = globalIdx;
+        renderText(globalIdx);
+        scrollToHighlight();
+        const progress = ((globalIdx + 1) / wordsOnly.length) * 100;
+        progressFill.style.width = Math.min(progress, 100) + '%';
+      }, 80);
+    };
 
-    azureAudio.addEventListener('ended', () => {
-      URL.revokeObjectURL(url);
-      azureChunkIdx++;
-      if (azureChunkIdx < azureChunks.length && state.isPlaying) {
-        playAzureChunk();
-      } else {
-        // Chapter done — auto-advance
-        releaseWakeLock();
-        renderText(-1);
-        progressFill.style.width = '100%';
-        const next = state.currentChapter + 1;
-        if (next < state.chapters.length) {
-          setTimeout(() => {
-            state.currentChapter = next;
-            chapterSelect.value  = next;
-            prevCh.disabled = next === 0;
-            nextCh.disabled = next >= state.chapters.length - 1;
-            state.words     = tokenizeWords(state.chapters[next].text);
-            state.wordIndex = 0;
-            renderText();
-            progressFill.style.width = '0%';
-            savePositionNow();
-            azureChunkIdx = 0;
-            startAzureSpeech(0);
-          }, 600);
-        } else {
-          state.isPlaying = false;
-          playBtn.innerHTML = '&#9654;';
-          setStatus('done');
+    await new Promise((resolve, reject) => {
+      azureSynthesizer.speakSsmlAsync(
+        ssml,
+        result => {
+          azureSynthesizer.close();
+          azureSynthesizer = null;
+          if (result.reason === SpeechSDK.ResultReason.SynthesizingAudioCompleted) {
+            resolve();
+          } else {
+            reject(new Error('Azure synthesis failed: ' + result.errorDetails));
+          }
+        },
+        err => {
+          if (azureSynthesizer) { azureSynthesizer.close(); azureSynthesizer = null; }
+          reject(new Error(err));
         }
+      );
+    });
+
+    if (!state.isPlaying) return;
+
+    azureChunkIdx++;
+    if (azureChunkIdx < azureChunks.length) {
+      await playNextAzureChunk();
+    } else {
+      // Chapter done — auto-advance
+      releaseWakeLock();
+      renderText(-1);
+      progressFill.style.width = '100%';
+      const next = state.currentChapter + 1;
+      if (next < state.chapters.length) {
+        setTimeout(() => {
+          state.currentChapter = next;
+          chapterSelect.value  = next;
+          prevCh.disabled = next === 0;
+          nextCh.disabled = next >= state.chapters.length - 1;
+          state.words     = tokenizeWords(state.chapters[next].text);
+          state.wordIndex = 0;
+          renderText();
+          progressFill.style.width = '0%';
+          savePositionNow();
+          azureChunkIdx = 0;
+          startAzureSpeech(0);
+        }, 600);
+      } else {
+        state.isPlaying = false;
+        playBtn.innerHTML = '&#9654;';
+        setStatus('done');
       }
-    });
-
-    azureAudio.addEventListener('error', () => {
-      setStatus('audio error — try again');
-      state.isPlaying = false;
-      playBtn.innerHTML = '&#9654;';
-    });
-
-    azureAudio.playbackRate = 1; // rate already applied in SSML
-    await azureAudio.play();
+    }
 
   } catch (err) {
     setStatus('⚠ ' + err.message);
@@ -1500,10 +1495,15 @@ function renderAzureVoiceList() {
       const btn = e.currentTarget;
       btn.textContent = '…';
       try {
-        const blob = await azureSynthesize('The quick brown fox jumps over the lazy dog.', v.id);
-        const audio = new Audio(URL.createObjectURL(blob));
-        audio.play();
-        audio.onended = () => btn.textContent = '▶';
+        const cfg   = SpeechSDK.SpeechConfig.fromSubscription(azureKey, azureRegion);
+        cfg.speechSynthesisVoiceName = v.id;
+        const audio = SpeechSDK.AudioConfig.fromDefaultSpeakerOutput();
+        const s     = new SpeechSDK.SpeechSynthesizer(cfg, audio);
+        s.speakTextAsync(
+          'The quick brown fox jumps over the lazy dog.',
+          () => { s.close(); btn.textContent = '▶'; },
+          () => { s.close(); btn.textContent = '▶'; }
+        );
       } catch { btn.textContent = '▶'; }
     });
     list.appendChild(row);
@@ -1523,7 +1523,6 @@ $('azure-save-btn').addEventListener('click', async () => {
   const keyInput = $('azure-key-input').value.trim();
   const region   = $('azure-region-input').value.trim() || 'eastus';
   if (!keyInput || keyInput.includes('•')) {
-    // Key unchanged, just save region
     azureRegion = region;
     localStorage.setItem('lectio_azure_region', region);
     showAzureStatus('✓ Settings saved');
@@ -1531,23 +1530,28 @@ $('azure-save-btn').addEventListener('click', async () => {
   }
   azureKey    = keyInput;
   azureRegion = region;
-  azureToken  = null; // force refresh
   localStorage.setItem('lectio_azure_key',    azureKey);
   localStorage.setItem('lectio_azure_region', azureRegion);
   showAzureStatus('Testing connection…');
   try {
-    await getAzureToken();
+    // Quick test synth
+    const cfg   = SpeechSDK.SpeechConfig.fromSubscription(azureKey, azureRegion);
+    const audio = SpeechSDK.AudioConfig.fromDefaultSpeakerOutput();
+    const s     = new SpeechSDK.SpeechSynthesizer(cfg, audio);
+    await new Promise((res, rej) => {
+      s.speakTextAsync('Connected.', r => { s.close(); res(r); }, e => { s.close(); rej(e); });
+    });
     showAzureStatus('✓ Connected — Azure TTS enabled');
     updatePickerLabel();
   } catch (err) {
-    showAzureStatus('⚠ ' + err.message);
+    showAzureStatus('⚠ Auth failed — check your key and region');
     azureKey = '';
     localStorage.removeItem('lectio_azure_key');
   }
 });
 
 $('azure-clear-btn').addEventListener('click', () => {
-  azureKey = ''; azureToken = null;
+  azureKey = '';
   localStorage.removeItem('lectio_azure_key');
   $('azure-key-input').value = '';
   showAzureStatus('Key cleared — using browser TTS');
@@ -1849,7 +1853,6 @@ function stopSpeech() {
   state.utterance = null;
   playBtn.innerHTML = '&#9654;';
 }
-
 function getCharOffset(tokens, targetWordIdx) {
   let charOffset = 0;
   let wordCount = 0;
@@ -1913,43 +1916,12 @@ playBtn.addEventListener('click', () => {
   if (!state.chapters.length) return;
 
   if (state.isPlaying) {
-    // Pause
-    if (azureEnabled() && azureAudio) {
-      azureAudio.pause();
-      azureWordTimers.forEach(t => clearTimeout(t));
-      azureWordTimers = [];
-    } else {
-      speechSynthesis.pause();
-      stopKeepalive();
-    }
-    releaseWakeLock();
-    state.isPlaying = false;
-    playBtn.innerHTML = '&#9654;';
+    // Stop
+    stopSpeech();
     setStatus('paused');
   } else {
-    // Resume or start
-    if (azureEnabled()) {
-      if (azureAudio && azureAudio.paused && azureAudio.currentTime > 0) {
-        azureAudio.play();
-        acquireWakeLock();
-        state.isPlaying = true;
-        playBtn.innerHTML = '&#9646;&#9646;';
-        setStatus('playing — ' + state.chapters[state.currentChapter].title);
-      } else {
-        startSpeech(state.wordIndex);
-      }
-    } else {
-      if (speechSynthesis.paused && speechSynthesis.speaking) {
-        speechSynthesis.resume();
-        startKeepalive();
-        acquireWakeLock();
-        state.isPlaying = true;
-        playBtn.innerHTML = '&#9646;&#9646;';
-        setStatus('playing — ' + state.chapters[state.currentChapter].title);
-      } else {
-        startSpeech(state.wordIndex);
-      }
-    }
+    // Start or restart from current word position
+    startSpeech(state.wordIndex);
   }
 });
 
