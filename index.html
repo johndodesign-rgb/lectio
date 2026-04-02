@@ -1106,11 +1106,10 @@ async function selectVoice(uri) {
   selectedVoiceURI = uri;
   localStorage.setItem('lectio_voice', uri);
   updatePickerLabel();
-  // Re-render to update selected state
   renderVoiceList();
-  // If currently playing, restart with new voice
   if (state.isPlaying) {
     const wi = state.wordIndex;
+    await stopSpeech();
     await startSpeech(wi);
   }
 }
@@ -1333,6 +1332,7 @@ let azureChunks      = [];
 let azureChunkIdx    = 0;
 let azureWordOffset  = 0; // global word index offset for current chunk
 let azurePlaybackToken = 0;
+let azureBusy = false;
 
 async function stopAzure() {
   const synth = azureSynthesizer;
@@ -1373,32 +1373,37 @@ function createSynthesizer() {
 }
 
 async function startAzureSpeech(fromWordIndex = 0) {
-  await stopAzure();
+  if (azureBusy) return;
+  azureBusy = true;
 
-  const myToken = azurePlaybackToken;
-  const fullText    = getSpeakableText();
-  const wordsOnly   = state.words.filter(w => /\S/.test(w));
-  const fromChar    = getCharOffset(state.words, fromWordIndex);
-  const textToSpeak = fullText.slice(fromChar);
-  if (!textToSpeak.trim()) { setStatus('done'); return; }
+  try {
+    await stopAzure();
 
-  // Split into ~200 word chunks
-  const words = textToSpeak.split(/\s+/).filter(Boolean);
-  const CHUNK = 200;
-  azureChunks = [];
-  let wIdx = 0;
-  for (let i = 0; i < words.length; i += CHUNK) {
-    const slice = words.slice(i, i + CHUNK);
-    azureChunks.push({ text: slice.join(' '), startWordIdx: fromWordIndex + wIdx });
-    wIdx += slice.length;
+    const myToken = azurePlaybackToken;
+    const fullText = getSpeakableText();
+    const fromChar = getCharOffset(state.words, fromWordIndex);
+    const textToSpeak = fullText.slice(fromChar);
+    if (!textToSpeak.trim()) { setStatus('done'); return; }
+
+    const words = textToSpeak.split(/\s+/).filter(Boolean);
+    const CHUNK = 200;
+    azureChunks = [];
+    let wIdx = 0;
+    for (let i = 0; i < words.length; i += CHUNK) {
+      const slice = words.slice(i, i + CHUNK);
+      azureChunks.push({ text: slice.join(' '), startWordIdx: fromWordIndex + wIdx });
+      wIdx += slice.length;
+    }
+
+    state.isPlaying = true;
+    playBtn.innerHTML = '&#9646;&#9646;';
+    setStatus('playing — ' + state.chapters[state.currentChapter].title);
+    acquireWakeLock();
+
+    await playNextAzureChunk(myToken);
+  } finally {
+    azureBusy = false;
   }
-
-  state.isPlaying = true;
-  playBtn.innerHTML = '&#9646;&#9646;';
-  setStatus('playing — ' + state.chapters[state.currentChapter].title);
-  acquireWakeLock();
-
-  await playNextAzureChunk(myToken);
 }
 
 async function playNextAzureChunk(token) {
@@ -1410,19 +1415,18 @@ async function playNextAzureChunk(token) {
   const wordsOnly = state.words.filter(w => /\S/.test(w));
 
   try {
-    azureSynthesizer = createSynthesizer();
+    const synth = createSynthesizer();
+    azureSynthesizer = synth;
     const ssml = buildSSML(chunk.text, azureVoice);
 
-    // Word boundary event — real timestamps from Azure SDK
     let localWordCount = 0;
-    azureSynthesizer.wordBoundary = () => {
-      if (!state.isPlaying || token !== azurePlaybackToken) return;
+    synth.wordBoundary = () => {
+      if (!state.isPlaying || token !== azurePlaybackToken || synth !== azureSynthesizer) return;
       const globalIdx = azureWordOffset + localWordCount;
       localWordCount++;
 
-      // Delay matches audio latency
       setTimeout(() => {
-        if (token !== azurePlaybackToken) return;
+        if (!state.isPlaying || token !== azurePlaybackToken || synth !== azureSynthesizer) return;
         state.wordIndex = globalIdx;
         renderText(globalIdx);
         scrollToHighlight();
@@ -1432,64 +1436,54 @@ async function playNextAzureChunk(token) {
     };
 
     await new Promise((resolve, reject) => {
-      // synthesisCompleted fires after audio finishes playing
-      azureSynthesizer.synthesisCompleted = () => resolve();
-      azureSynthesizer.SynthesisCanceled = (s, e) => reject(new Error(e.errorDetails));
+      synth.synthesisCompleted = () => {
+        if (token !== azurePlaybackToken || synth !== azureSynthesizer) return resolve();
+        resolve();
+      };
+      synth.SynthesisCanceled = (s, e) => {
+        if (token !== azurePlaybackToken || synth !== azureSynthesizer) return resolve();
+        reject(new Error(e.errorDetails));
+      };
 
-      azureSynthesizer.speakSsmlAsync(
+      synth.speakSsmlAsync(
         ssml,
         result => {
+          if (token !== azurePlaybackToken || synth !== azureSynthesizer) return resolve();
           if (result.reason !== SpeechSDK.ResultReason.SynthesizingAudioCompleted) {
             reject(new Error('Azure synthesis failed: ' + (result.errorDetails || 'unknown')));
           }
         },
         err => {
+          if (token !== azurePlaybackToken || synth !== azureSynthesizer) return resolve();
           reject(new Error(err));
         }
       );
     });
 
-    if (!state.isPlaying || token !== azurePlaybackToken) return;
+    if (!state.isPlaying || token !== azurePlaybackToken || synth !== azureSynthesizer) return;
 
-    if (azureSynthesizer) { try { azureSynthesizer.close(); } catch (e) {} azureSynthesizer = null; }
+    try { synth.close(); } catch(e) {}
+    if (azureSynthesizer === synth) azureSynthesizer = null;
 
     azureChunkIdx++;
     if (azureChunkIdx < azureChunks.length) {
       await playNextAzureChunk(token);
     } else {
-      // Chapter done — auto-advance
       releaseWakeLock();
       renderText(-1);
       progressFill.style.width = '100%';
-      const next = state.currentChapter + 1;
-      if (next < state.chapters.length) {
-        setTimeout(() => {
-          if (token !== azurePlaybackToken) return;
-          state.currentChapter = next;
-          chapterSelect.value  = next;
-          prevCh.disabled = next === 0;
-          nextCh.disabled = next >= state.chapters.length - 1;
-          state.words     = tokenizeWords(state.chapters[next].text);
-          state.wordIndex = 0;
-          renderText();
-          progressFill.style.width = '0%';
-          savePositionNow();
-          azureChunkIdx = 0;
-          startAzureSpeech(0);
-        }, 600);
-      } else {
-        state.isPlaying = false;
-        playBtn.innerHTML = '&#9654;';
-        setStatus('done');
-      }
+      state.isPlaying = false;
+      playBtn.innerHTML = '&#9654;';
+      setStatus('done');
     }
-
   } catch (err) {
     if (token !== azurePlaybackToken) return;
     setStatus('⚠ ' + err.message);
     state.isPlaying = false;
     playBtn.innerHTML = '&#9654;';
     releaseWakeLock();
+    try { if (azureSynthesizer) azureSynthesizer.close(); } catch(e) {}
+    azureSynthesizer = null;
   }
 }
 
@@ -1514,7 +1508,7 @@ function renderAzureVoiceList() {
       localStorage.setItem('lectio_azure_voice', azureVoice);
       updatePickerLabel();
       renderAzureVoiceList();
-      if (state.isPlaying) { const wi = state.wordIndex; startAzureSpeech(wi); }
+      if (state.isPlaying) { (async () => { const wi = state.wordIndex; await stopSpeech(); await startSpeech(wi); })(); }
     });
     row.querySelector('.voice-preview-btn').addEventListener('click', async e => {
       e.stopPropagation();
@@ -1911,15 +1905,27 @@ function unlockTTS() {
 }
 
 // ─── iOS: resume after screen wakes / tab returns to foreground ───────────────
-document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && state.isPlaying) {
-    const wi = state.wordIndex;
+let resumeTimer = null;
+
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState !== 'visible' || !state.isPlaying) return;
+
+  await acquireWakeLock();
+
+  clearTimeout(resumeTimer);
+  resumeTimer = setTimeout(async () => {
+    if (!state.isPlaying) return;
+
     if (azureEnabled()) {
-      setTimeout(() => startAzureSpeech(wi), 300);
-    } else if (!speechSynthesis.speaking) {
-      setTimeout(() => startSpeech(wi), 300);
+      await stopAzure();
+      await startAzureSpeech(state.wordIndex);
+      return;
     }
-  }
+
+    if (!speechSynthesis.speaking && !speechSynthesis.pending) {
+      await startSpeech(state.wordIndex);
+    }
+  }, 300);
 });
 
 // ─── Chrome keepalive: Chrome stops TTS after ~15s unless we ping it ──────────
@@ -1955,23 +1961,33 @@ playBtn.addEventListener('click', async () => {
 restartBtn.addEventListener('click', async () => {
   state.wordIndex = 0;
   renderText(-1);
-  if (state.isPlaying) await startSpeech(0);
-  else { await stopSpeech(); progressFill.style.width = '0%'; setStatus('ready'); }
+  if (state.isPlaying) {
+    await stopSpeech();
+    await startSpeech(0);
+  } else {
+    await stopSpeech();
+    progressFill.style.width = '0%';
+    setStatus('ready');
+  }
 });
 
 backBtn.addEventListener('click', async () => {
   const newIdx = Math.max(0, state.wordIndex - 30);
   state.wordIndex = newIdx;
-  if (state.isPlaying) await startSpeech(newIdx);
-  else renderText(-1);
+  if (state.isPlaying) {
+    await stopSpeech();
+    await startSpeech(newIdx);
+  } else renderText(-1);
 });
 
 fwdBtn.addEventListener('click', async () => {
   const wordsOnly = state.words.filter(w => /\S/.test(w));
   const newIdx = Math.min(wordsOnly.length - 1, state.wordIndex + 30);
   state.wordIndex = newIdx;
-  if (state.isPlaying) await startSpeech(newIdx);
-  else renderText(-1);
+  if (state.isPlaying) {
+    await stopSpeech();
+    await startSpeech(newIdx);
+  } else renderText(-1);
 });
 
 closeBtn.addEventListener('click', async () => {
@@ -1999,6 +2015,7 @@ textContent.addEventListener('click', async e => {
   if (isNaN(idx)) return;
   state.wordIndex = idx;
   unlockTTS();
+  await stopSpeech();
   await startSpeech(idx);
 });
 
@@ -2011,19 +2028,19 @@ $('progress-track').addEventListener('click', async e => {
   state.wordIndex = idx;
   progressFill.style.width = (pct * 100) + '%';
   unlockTTS();
+  await stopSpeech();
   await startSpeech(idx);
-  // Scroll text to rough position
   textDisplay.scrollTop = textDisplay.scrollHeight * pct;
 });
 
 rateSlider.addEventListener('input', async () => {
   rateVal.textContent = parseFloat(rateSlider.value).toFixed(1) + '×';
-  if (state.isPlaying) { const wi = state.wordIndex; await startSpeech(wi); }
+  if (state.isPlaying) { const wi = state.wordIndex; await stopSpeech(); await startSpeech(wi); }
 });
 
 pitchSlider.addEventListener('input', async () => {
   pitchVal.textContent = parseFloat(pitchSlider.value).toFixed(1);
-  if (state.isPlaying) { const wi = state.wordIndex; await startSpeech(wi); }
+  if (state.isPlaying) { const wi = state.wordIndex; await stopSpeech(); await startSpeech(wi); }
 });
 
 // ─── UI helpers ───────────────────────────────────────────────────────────────
@@ -2158,18 +2175,6 @@ function releaseWakeLock() {
 }
 
 // Re-acquire wake lock if page becomes visible again (e.g. screen wakes)
-document.addEventListener('visibilitychange', async () => {
-  if (document.visibilityState === 'visible' && state.isPlaying) {
-    await acquireWakeLock();
-    const wi = state.wordIndex;
-    if (azureEnabled()) {
-      setTimeout(() => startAzureSpeech(wi), 300);
-    } else if (!speechSynthesis.speaking) {
-      setTimeout(() => startSpeech(wi), 300);
-    }
-  }
-});
-
 // ─── Lazy file parsing ────────────────────────────────────────────────────────
 // Replaced synchronous parsers with lazy versions that yield first chapters fast
 
