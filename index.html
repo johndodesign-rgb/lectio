@@ -1408,18 +1408,13 @@ async function playNextAzureChunk() {
     };
 
     await new Promise((resolve, reject) => {
-      // synthesisCompleted fires after audio finishes playing
-      azureSynthesizer.synthesisCompleted = (s, e) => resolve();
-      azureSynthesizer.SynthesisCanceled = (s, e) => reject(new Error(e.errorDetails));
-
       azureSynthesizer.speakSsmlAsync(
         ssml,
         result => {
+          if (azureSynthesizer) { azureSynthesizer.close(); azureSynthesizer = null; }
           if (result.reason === SpeechSDK.ResultReason.SynthesizingAudioCompleted) {
-            // resolve handled by synthesisCompleted above
+            resolve();
           } else {
-            azureSynthesizer.close();
-            azureSynthesizer = null;
             reject(new Error('Azure synthesis failed: ' + (result.errorDetails || 'unknown')));
           }
         },
@@ -1431,8 +1426,6 @@ async function playNextAzureChunk() {
     });
 
     if (!state.isPlaying) return;
-
-    if (azureSynthesizer) { azureSynthesizer.close(); azureSynthesizer = null; }
 
     azureChunkIdx++;
     if (azureChunkIdx < azureChunks.length) {
