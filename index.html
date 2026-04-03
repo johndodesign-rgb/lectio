@@ -214,14 +214,14 @@
     position: sticky;
     top: 50%;
     transform: translateY(-50%);
-    height: 2.4em;
+    height: 5em;
     margin: 0 -8px;
-    background: rgba(212,149,42,.10);
-    border-top: 1px solid rgba(212,149,42,.25);
-    border-bottom: 1px solid rgba(212,149,42,.25);
+    background: rgba(212,149,42,.08);
+    border-top: 1px solid rgba(212,149,42,.2);
+    border-bottom: 1px solid rgba(212,149,42,.2);
     pointer-events: none;
     z-index: 2;
-    display: none; /* hidden until playing */
+    display: none;
   }
 
   #teleprompter-band.active { display: block; }
@@ -238,13 +238,10 @@
     padding-bottom: 40vh;
   }
 
-  /* Highlighted word during TTS — subtler inside the band */
-  .speaking-word {
-    background: rgba(212,149,42,.28);
-    color: var(--amber);
-    border-radius: 2px;
-    padding: 0 1px;
-  }
+  /* Clickable word spans — no highlight, just cursor */
+  .word-span { cursor: pointer; border-radius: 2px; }
+  .word-span:hover { background: rgba(255,255,255,.05); }
+  .speaking-word { /* no visual highlight — band does the work */ }
 
   /* Clickable word spans */
   .word-span {
