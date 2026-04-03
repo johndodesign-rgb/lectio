@@ -1302,14 +1302,10 @@ function renderText(highlightIdx = -1) {
   let wordCount = 0;
   for (let i = 0; i < words.length; i++) {
     if (/\S/.test(words[i])) {
-      if (wordCount === highlightIdx) {
-        html += `<mark class="speaking-word word-span" data-widx="${wordCount}">${escHtml(words[i])}</mark>`;
-      } else {
-        html += `<span class="word-span" data-widx="${wordCount}">${escHtml(words[i])}</span>`;
-      }
+      html += `<span class="word-span" data-widx="${wordCount}">${escHtml(words[i])}</span>`;
       wordCount++;
     } else {
-      html += words[i]; // whitespace preserved as-is
+      html += words[i];
     }
   }
   textContent.innerHTML = html;
