@@ -1956,14 +1956,17 @@ function scrollToHighlight() {
   const span = textContent.querySelector(`[data-widx="${state.wordIndex}"]`);
   if (!span) return;
 
-  const displayRect = textDisplay.getBoundingClientRect();
-  const spanRect    = span.getBoundingClientRect();
-
+  const displayRect  = textDisplay.getBoundingClientRect();
+  const spanRect     = span.getBoundingClientRect();
   const targetCenter = displayRect.top + displayRect.height / 2;
   const spanCenter   = spanRect.top + spanRect.height / 2;
   const delta        = spanCenter - targetCenter;
 
-  textDisplay.scrollBy({ top: delta, behavior: 'smooth' });
+  // Only scroll if word has drifted more than 1 line height from center
+  const lineHeight = parseFloat(getComputedStyle(textContent).lineHeight) || 34;
+  if (Math.abs(delta) > lineHeight * 0.75) {
+    textDisplay.scrollBy({ top: delta, behavior: 'smooth' });
+  }
 }
 
 function showTeleprompterBand() {
