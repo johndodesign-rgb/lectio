@@ -15,8 +15,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <!-- JSZip for EPUB -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
-<!-- Mammoth for DOCX -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+<!-- Mammoth loaded on demand when DOCX is opened -->
 
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Mono:wght@300;400&display=swap');
@@ -204,10 +203,28 @@
     padding: 36px 8px 20px;
     scrollbar-width: thin;
     scrollbar-color: var(--border) transparent;
+    position: relative;
   }
 
   #text-display::-webkit-scrollbar { width: 4px; }
   #text-display::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+  /* ── Teleprompter band ── */
+  #teleprompter-band {
+    position: sticky;
+    top: 50%;
+    transform: translateY(-50%);
+    height: 2.4em;
+    margin: 0 -8px;
+    background: rgba(212,149,42,.10);
+    border-top: 1px solid rgba(212,149,42,.25);
+    border-bottom: 1px solid rgba(212,149,42,.25);
+    pointer-events: none;
+    z-index: 2;
+    display: none; /* hidden until playing */
+  }
+
+  #teleprompter-band.active { display: block; }
 
   #text-content {
     font-size: 1.15rem;
@@ -215,11 +232,15 @@
     color: var(--text);
     white-space: pre-wrap;
     word-break: break-word;
+    position: relative;
+    z-index: 1;
+    padding-top: 40vh;
+    padding-bottom: 40vh;
   }
 
-  /* Highlighted word during TTS */
+  /* Highlighted word during TTS — subtler inside the band */
   .speaking-word {
-    background: rgba(212,149,42,.22);
+    background: rgba(212,149,42,.28);
     color: var(--amber);
     border-radius: 2px;
     padding: 0 1px;
@@ -810,6 +831,7 @@
     </div>
 
     <div id="text-display">
+      <div id="teleprompter-band"></div>
       <div id="text-content"></div>
     </div>
 
@@ -1188,27 +1210,58 @@ dropZone.addEventListener('click', e => {
   if (e.target.tagName !== 'BUTTON') $('file-input').click();
 });
 
-// ─── DOCX parsing ─────────────────────────────────────────────────────────────
-async function parseDOCX(file) {
-  const buf = await file.arrayBuffer();
+// ─── DOCX parsing — lazy loads mammoth only when needed ──────────────────────
+let mammothLoaded = false;
+
+async function loadMammoth() {
+  if (mammothLoaded) return;
+  await new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js';
+    script.onload = resolve;
+    script.onerror = reject;
+    document.head.appendChild(script);
+  });
+  mammothLoaded = true;
+}
+
+async function lazyParseDOCX(file) {
+  loadingMsg.textContent = 'Loading document parser…';
+  await loadMammoth();
+
+  loadingMsg.textContent = 'Reading document…';
+  const buf    = await file.arrayBuffer();
   const result = await mammoth.extractRawText({ arrayBuffer: buf });
   const fullText = result.value.trim();
   if (!fullText) throw new Error('No readable text found in DOCX.');
 
-  // Split into ~800-word chunks as "chapters"
   const words = fullText.split(/\s+/);
   const CHUNK = 800;
-  state.chapters = [];
+  const totalSections = Math.ceil(words.length / CHUNK);
 
-  for (let i = 0; i < words.length; i += CHUNK) {
-    const slice = words.slice(i, i + CHUNK).join(' ');
+  // Push first section immediately
+  state.chapters.push({
+    title: totalSections === 1 ? 'Full Document' : `Section 1 of ${totalSections}`,
+    text: words.slice(0, CHUNK).join(' '),
+  });
+
+  populateChapters(false);
+  showReader();
+
+  // Parse remaining sections in background
+  for (let i = CHUNK; i < words.length; i += CHUNK) {
     const sectionNum = Math.floor(i / CHUNK) + 1;
-    const totalSections = Math.ceil(words.length / CHUNK);
     state.chapters.push({
-      title: totalSections === 1 ? 'Full Document' : `Section ${sectionNum} of ${totalSections}`,
-      text: slice,
+      title: `Section ${sectionNum} of ${totalSections}`,
+      text: words.slice(i, i + CHUNK).join(' '),
     });
+    addChapterToSelect(state.chapters.length - 1);
+    await new Promise(r => setTimeout(r, 0));
   }
+
+  state.parseComplete = true;
+  saveParsedChapters().catch(() => {});
+  updateNavButtons();
 }
 
 
@@ -1332,6 +1385,7 @@ let azureChunkIdx   = 0;
 let azureWordOffset = 0;
 let azureToken      = null;
 let azureTokenExpiry = 0;
+let azurePrefetchUrl = null; // pre-fetched audio URL for next chunk
 
 async function getAzureToken() {
   if (azureToken && Date.now() < azureTokenExpiry) return azureToken;
@@ -1369,6 +1423,8 @@ function stopAzure() {
     azureAudio.src = '';
     azureAudio = null;
   }
+  // Revoke any pre-fetched URL
+  if (azurePrefetchUrl) { URL.revokeObjectURL(azurePrefetchUrl); azurePrefetchUrl = null; }
   azureChunks    = [];
   azureChunkIdx  = 0;
   azureWordOffset = 0;
@@ -1397,6 +1453,7 @@ async function startAzureSpeech(fromWordIndex = 0) {
   playBtn.innerHTML = '&#9646;&#9646;';
   setStatus('playing — ' + state.chapters[state.currentChapter].title);
   acquireWakeLock();
+  showTeleprompterBand();
 
   playNextAzureChunk();
 }
@@ -1404,19 +1461,38 @@ async function startAzureSpeech(fromWordIndex = 0) {
 function playNextAzureChunk() {
   if (azureChunkIdx >= azureChunks.length || !state.isPlaying) return;
 
-  const chunk   = azureChunks[azureChunkIdx];
+  const chunk     = azureChunks[azureChunkIdx];
   const wordsOnly = state.words.filter(w => /\S/.test(w));
   azureWordOffset = chunk.startWordIdx;
-  const ssml    = buildSSML(chunk.text, azureVoice);
+  const ssml      = buildSSML(chunk.text, azureVoice);
 
-  azureSynthesize(ssml).then(url => {
+  // Use pre-fetched URL if available, otherwise fetch now
+  const urlPromise = azurePrefetchUrl
+    ? Promise.resolve(azurePrefetchUrl).finally(() => { azurePrefetchUrl = null; })
+    : azureSynthesize(ssml);
+
+  urlPromise.then(url => {
     if (!state.isPlaying) { URL.revokeObjectURL(url); return; }
 
     azureAudio = new Audio(url);
 
+    // Pre-fetch next chunk while this one plays
+    const nextIdx = azureChunkIdx + 1;
+    if (nextIdx < azureChunks.length) {
+      const nextSSML = buildSSML(azureChunks[nextIdx].text, azureVoice);
+      azureSynthesize(nextSSML).then(nextUrl => {
+        // Only keep if we're still on the same session
+        if (state.isPlaying && azureChunkIdx === chunk.startWordIdx || true) {
+          azurePrefetchUrl = nextUrl;
+        } else {
+          URL.revokeObjectURL(nextUrl);
+        }
+      }).catch(() => {}); // silently ignore prefetch failures
+    }
+
     // Estimate word highlights by timing
     azureAudio.addEventListener('loadedmetadata', () => {
-      const dur      = azureAudio.duration * 1000;
+      const dur        = azureAudio.duration * 1000;
       const chunkWords = chunk.text.split(/\s+/).filter(Boolean);
       const msPerWord  = dur / chunkWords.length;
       chunkWords.forEach((_, i) => {
@@ -1855,6 +1931,7 @@ function browserStartSpeech(fromWordIndex = 0) {
   speakChunk();
   startKeepalive();
   acquireWakeLock();
+  showTeleprompterBand();
   state.isPlaying = true;
   playBtn.innerHTML = '&#9646;&#9646;';
   setStatus('playing — ' + state.chapters[state.currentChapter].title);
@@ -1865,6 +1942,7 @@ function stopSpeech() {
   speechSynthesis.cancel();
   stopKeepalive();
   releaseWakeLock();
+  hideTeleprompterBand();
   state.isPlaying = false;
   state.utterance = null;
   playBtn.innerHTML = '&#9654;';
@@ -1883,7 +1961,25 @@ function stopSpeech() {
 
 function scrollToHighlight() {
   const mark = textContent.querySelector('.speaking-word');
-  if (mark) mark.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  if (!mark) return;
+
+  const displayRect = textDisplay.getBoundingClientRect();
+  const markRect    = mark.getBoundingClientRect();
+
+  // Target: center of text-display
+  const targetCenter = displayRect.top + displayRect.height / 2;
+  const markCenter   = markRect.top + markRect.height / 2;
+  const delta        = markCenter - targetCenter;
+
+  textDisplay.scrollBy({ top: delta, behavior: 'smooth' });
+}
+
+function showTeleprompterBand() {
+  $('teleprompter-band').classList.add('active');
+}
+
+function hideTeleprompterBand() {
+  $('teleprompter-band').classList.remove('active');
 }
 
 // ─── TTS unlock — must happen synchronously inside a user gesture ─────────────
@@ -2186,8 +2282,7 @@ async function handleFile(file) {
     } else if (ext === 'epub') {
       await lazyParseEPUB(file);
     } else if (ext === 'docx') {
-      await parseDOCX(file); // DOCX is fast enough to parse fully
-      state.parseComplete = true;
+      await lazyParseDOCX(file);
     } else {
       throw new Error('Unsupported format. Please use PDF, EPUB, or DOCX.');
     }
