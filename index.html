@@ -1953,16 +1953,15 @@ function stopSpeech() {
 }
 
 function scrollToHighlight() {
-  const mark = textContent.querySelector('.speaking-word');
-  if (!mark) return;
+  const span = textContent.querySelector(`[data-widx="${state.wordIndex}"]`);
+  if (!span) return;
 
   const displayRect = textDisplay.getBoundingClientRect();
-  const markRect    = mark.getBoundingClientRect();
+  const spanRect    = span.getBoundingClientRect();
 
-  // Target: center of text-display
   const targetCenter = displayRect.top + displayRect.height / 2;
-  const markCenter   = markRect.top + markRect.height / 2;
-  const delta        = markCenter - targetCenter;
+  const spanCenter   = spanRect.top + spanRect.height / 2;
+  const delta        = spanCenter - targetCenter;
 
   textDisplay.scrollBy({ top: delta, behavior: 'smooth' });
 }
