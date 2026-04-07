@@ -1822,7 +1822,9 @@ function cleanText(text) {
     .replace(/—/g, ', ')
     .replace(/–/g, ', ')
     // Ensure periods are followed by a space so TTS pauses correctly
-    .replace(/\.(?=[A-Z])/g, '. ');
+    .replace(/\.(?=[A-Z])/g, '. ')
+    // Ensure closing punctuation followed by opening quote gets a space
+    .replace(/([.!?,;])([""''])/g, '$1 $2');
 }
 
 function getSpeakableText() {
