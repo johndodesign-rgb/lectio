@@ -1378,7 +1378,7 @@ let azureChunkIdx   = 0;
 let azureWordOffset = 0;
 let azureToken      = null;
 let azureTokenExpiry = 0;
-let azurePrefetchUrl = null; // pre-fetched audio URL for next chunk
+let azurePrefetchCache = {}; // map of chunkIdx -> url
 
 async function getAzureToken() {
   if (azureToken && Date.now() < azureTokenExpiry) return azureToken;
@@ -1416,8 +1416,9 @@ function stopAzure() {
     azureAudio.src = '';
     azureAudio = null;
   }
-  // Revoke any pre-fetched URL
-  if (azurePrefetchUrl) { URL.revokeObjectURL(azurePrefetchUrl); azurePrefetchUrl = null; }
+  // Revoke all prefetched URLs
+  Object.values(azurePrefetchCache).forEach(url => URL.revokeObjectURL(url));
+  azurePrefetchCache = {};
   azureChunks    = [];
   azureChunkIdx  = 0;
   azureWordOffset = 0;
@@ -1448,6 +1449,17 @@ async function startAzureSpeech(fromWordIndex = 0) {
   acquireWakeLock();
   showTeleprompterBand();
 
+  // Pre-fetch chunks 1 and 2 immediately so buffer is ready
+  [1, 2].forEach(idx => {
+    if (idx < azureChunks.length) {
+      const ssml = buildSSML(azureChunks[idx].text, azureVoice);
+      azureSynthesize(ssml).then(url => {
+        if (state.isPlaying) azurePrefetchCache[idx] = url;
+        else URL.revokeObjectURL(url);
+      }).catch(() => {});
+    }
+  });
+
   playNextAzureChunk();
 }
 
@@ -1457,31 +1469,34 @@ function playNextAzureChunk() {
   const chunk     = azureChunks[azureChunkIdx];
   const wordsOnly = state.words.filter(w => /\S/.test(w));
   azureWordOffset = chunk.startWordIdx;
-  const ssml      = buildSSML(chunk.text, azureVoice);
+  const ssml = buildSSML(chunk.text, azureVoice);
 
-  // Use pre-fetched URL if available, otherwise fetch now
-  const urlPromise = azurePrefetchUrl
-    ? Promise.resolve(azurePrefetchUrl).finally(() => { azurePrefetchUrl = null; })
+  // Use cached URL if available, otherwise fetch now
+  const urlPromise = azurePrefetchCache[azureChunkIdx]
+    ? Promise.resolve(azurePrefetchCache[azureChunkIdx])
     : azureSynthesize(ssml);
 
   urlPromise.then(url => {
+    // Remove from cache now that we're using it
+    delete azurePrefetchCache[azureChunkIdx];
+
     if (!state.isPlaying) { URL.revokeObjectURL(url); return; }
 
     azureAudio = new Audio(url);
 
-    // Pre-fetch next chunk while this one plays
-    const nextIdx = azureChunkIdx + 1;
-    if (nextIdx < azureChunks.length) {
-      const nextSSML = buildSSML(azureChunks[nextIdx].text, azureVoice);
-      azureSynthesize(nextSSML).then(nextUrl => {
-        // Only keep if we're still on the same session
-        if (state.isPlaying && azureChunkIdx === chunk.startWordIdx || true) {
-          azurePrefetchUrl = nextUrl;
-        } else {
-          URL.revokeObjectURL(nextUrl);
-        }
-      }).catch(() => {}); // silently ignore prefetch failures
-    }
+    // Pre-fetch N+1 and N+2 while this chunk plays
+    [azureChunkIdx + 1, azureChunkIdx + 2].forEach(prefetchIdx => {
+      if (prefetchIdx < azureChunks.length && !azurePrefetchCache[prefetchIdx]) {
+        const prefetchSSML = buildSSML(azureChunks[prefetchIdx].text, azureVoice);
+        azureSynthesize(prefetchSSML).then(prefetchUrl => {
+          if (state.isPlaying) {
+            azurePrefetchCache[prefetchIdx] = prefetchUrl;
+          } else {
+            URL.revokeObjectURL(prefetchUrl);
+          }
+        }).catch(() => {});
+      }
+    });
 
     // Estimate word highlights by timing
     azureAudio.addEventListener('loadedmetadata', () => {
@@ -1805,7 +1820,9 @@ function cleanText(text) {
     .replace(/\.{3}/g, '... ')
     // Em dashes: replace with comma-pause for natural break
     .replace(/—/g, ', ')
-    .replace(/–/g, ', ');
+    .replace(/–/g, ', ')
+    // Ensure periods are followed by a space so TTS pauses correctly
+    .replace(/\.(?=[A-Z])/g, '. ');
 }
 
 function getSpeakableText() {
