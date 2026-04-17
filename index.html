@@ -1338,6 +1338,7 @@ let azureChunks     = [];
 let azureChunkIdx   = 0;
 let azureWordOffset = 0;
 let azurePrefetchCache = {}; // map of chunkIdx -> url
+let azureWordTimers = []; // active word highlight timers
 
 async function azureSynthesize(ssml) {
   const res = await fetch(
@@ -1362,6 +1363,9 @@ function stopAzure() {
     azureAudio.src = '';
     azureAudio = null;
   }
+  // Cancel all pending word highlight timers
+  azureWordTimers.forEach(t => clearTimeout(t));
+  azureWordTimers = [];
   // Revoke all prefetched URLs
   Object.values(azurePrefetchCache).forEach(url => URL.revokeObjectURL(url));
   azurePrefetchCache = {};
@@ -1449,8 +1453,11 @@ function playNextAzureChunk() {
       const dur        = azureAudio.duration * 1000;
       const chunkWords = chunk.text.split(/\s+/).filter(Boolean);
       const msPerWord  = dur / chunkWords.length;
+      // Clear any previous timers before setting new ones
+      azureWordTimers.forEach(t => clearTimeout(t));
+      azureWordTimers = [];
       chunkWords.forEach((_, i) => {
-        setTimeout(() => {
+        const t = setTimeout(() => {
           if (!state.isPlaying) return;
           const idx = azureWordOffset + i;
           state.wordIndex = idx;
@@ -1459,6 +1466,7 @@ function playNextAzureChunk() {
           const progress = ((idx + 1) / wordsOnly.length) * 100;
           progressFill.style.width = Math.min(progress, 100) + '%';
         }, i * msPerWord);
+        azureWordTimers.push(t);
       });
     });
 
@@ -2399,7 +2407,6 @@ async function parseDOCX(file) {
 }
 
 // ─── Restore session ──────────────────────────────────────────────────────────
-// ─── Restore session ──────────────────────────────────────────────────────────
 async function restoreSession() {
   try {
     await openDB();
@@ -2457,7 +2464,6 @@ async function doRestore() {
     if (!cached?.chapters?.length) { hideLoading(); return; }
 
     state.chapters = cached.chapters;
-    state.parseComplete = true;
     fileMeta.textContent = saved?.name || 'Your book';
 
     const pos       = await dbGet('position', 'current');
@@ -2474,7 +2480,8 @@ async function doRestore() {
 
     state.currentChapter = chapter;
     chapterSelect.value  = chapter;
-    updateNavButtons();
+    prevCh.disabled = chapter === 0;
+    nextCh.disabled = chapter >= state.chapters.length - 1;
     state.words     = tokenizeWords(state.chapters[chapter].text);
     state.wordIndex = Math.min(wordIndex, state.words.filter(w => /\S/.test(w)).length - 1);
 
