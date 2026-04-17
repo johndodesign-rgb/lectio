@@ -433,6 +433,22 @@
 
   #loading.active { display: flex; }
 
+  #loading-progress-track {
+    width: 200px;
+    height: 2px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  #loading-progress-fill {
+    height: 100%;
+    background: var(--amber);
+    width: 0%;
+    transition: width .3s ease;
+    border-radius: 2px;
+  }
+
   .spinner {
     width: 36px;
     height: 36px;
@@ -934,7 +950,7 @@
   </div>
 </div>
 
-<div id="loading"><div class="spinner"></div><p id="loading-msg">Parsing file…</p></div>
+<div id="loading"><div class="spinner"></div><p id="loading-msg">Parsing file…</p><div id="loading-progress-track"><div id="loading-progress-fill"></div></div></div>
 
 <script>
 // ─── State ───────────────────────────────────────────────────────────────────
@@ -945,7 +961,6 @@ const state = {
   wordIndex: 0,
   isPlaying: false,
   utterance: null,
-  parseComplete: false,
 };
 
 // ─── Refs ─────────────────────────────────────────────────────────────────────
@@ -1207,62 +1222,8 @@ dropZone.addEventListener('click', e => {
   if (e.target.tagName !== 'BUTTON') $('file-input').click();
 });
 
-// ─── DOCX parsing — lazy loads mammoth only when needed ──────────────────────
-let mammothLoaded = false;
 
-async function loadMammoth() {
-  if (mammothLoaded) return;
-  await new Promise((resolve, reject) => {
-    const script = document.createElement('script');
-    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js';
-    script.onload = resolve;
-    script.onerror = reject;
-    document.head.appendChild(script);
-  });
-  mammothLoaded = true;
-}
-
-async function lazyParseDOCX(file) {
-  loadingMsg.textContent = 'Loading document parser…';
-  await loadMammoth();
-
-  loadingMsg.textContent = 'Reading document…';
-  const buf    = await file.arrayBuffer();
-  const result = await mammoth.extractRawText({ arrayBuffer: buf });
-  const fullText = result.value.trim();
-  if (!fullText) throw new Error('No readable text found in DOCX.');
-
-  const words = fullText.split(/\s+/);
-  const CHUNK = 800;
-  const totalSections = Math.ceil(words.length / CHUNK);
-
-  // Push first section immediately
-  state.chapters.push({
-    title: totalSections === 1 ? 'Full Document' : `Section 1 of ${totalSections}`,
-    text: words.slice(0, CHUNK).join(' '),
-  });
-
-  populateChapters(false);
-  showReader();
-
-  // Parse remaining sections in background
-  for (let i = CHUNK; i < words.length; i += CHUNK) {
-    const sectionNum = Math.floor(i / CHUNK) + 1;
-    state.chapters.push({
-      title: `Section ${sectionNum} of ${totalSections}`,
-      text: words.slice(i, i + CHUNK).join(' '),
-    });
-    addChapterToSelect(state.chapters.length - 1);
-    await new Promise(r => setTimeout(r, 0));
-  }
-
-  state.parseComplete = true;
-  saveParsedChapters().catch(() => {});
-  updateNavButtons();
-}
-
-
-function populateChapters(autoLoad = true) {
+function populateChapters() {
   chapterSelect.innerHTML = '';
   state.chapters.forEach((ch, i) => {
     const opt = document.createElement('option');
@@ -1270,7 +1231,7 @@ function populateChapters(autoLoad = true) {
     opt.textContent = ch.title;
     chapterSelect.appendChild(opt);
   });
-  if (autoLoad) loadChapter(0);
+  loadChapter(0);
 }
 
 function loadChapter(index) {
@@ -1376,30 +1337,15 @@ let azureAudio      = null;
 let azureChunks     = [];
 let azureChunkIdx   = 0;
 let azureWordOffset = 0;
-let azureToken      = null;
-let azureTokenExpiry = 0;
 let azurePrefetchCache = {}; // map of chunkIdx -> url
 
-async function getAzureToken() {
-  if (azureToken && Date.now() < azureTokenExpiry) return azureToken;
-  const res = await fetch(
-    `https://${azureRegion}.api.cognitive.microsoft.com/sts/v1.0/issueToken`,
-    { method: 'POST', headers: { 'Ocp-Apim-Subscription-Key': azureKey } }
-  );
-  if (!res.ok) throw new Error('Azure auth failed — check your key and region.');
-  azureToken = await res.text();
-  azureTokenExpiry = Date.now() + 9 * 60 * 1000;
-  return azureToken;
-}
-
 async function azureSynthesize(ssml) {
-  const token = await getAzureToken();
   const res = await fetch(
     `https://${azureRegion}.tts.speech.microsoft.com/cognitiveservices/v1`,
     {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${token}`,
+        'Ocp-Apim-Subscription-Key': azureKey,
         'Content-Type': 'application/ssml+xml',
         'X-Microsoft-OutputFormat': 'audio-24khz-48kbitrate-mono-mp3',
       },
@@ -1640,7 +1586,19 @@ $('azure-save-btn').addEventListener('click', async () => {
   localStorage.setItem('lectio_azure_region', azureRegion);
   showAzureStatus('Testing connection…');
   try {
-    await getAzureToken();
+    const testRes = await fetch(
+      `https://${azureRegion}.tts.speech.microsoft.com/cognitiveservices/v1`,
+      {
+        method: 'POST',
+        headers: {
+          'Ocp-Apim-Subscription-Key': azureKey,
+          'Content-Type': 'application/ssml+xml',
+          'X-Microsoft-OutputFormat': 'audio-24khz-48kbitrate-mono-mp3',
+        },
+        body: `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US"><voice name="en-GB-RyanNeural">test</voice></speak>`,
+      }
+    );
+    if (!testRes.ok) throw new Error(`${testRes.status}`);
     showAzureStatus('✓ Connected — Azure TTS enabled');
     updatePickerLabel();
   } catch (err) {
@@ -1651,7 +1609,7 @@ $('azure-save-btn').addEventListener('click', async () => {
 });
 
 $('azure-clear-btn').addEventListener('click', () => {
-  azureKey = ''; azureToken = null;
+  azureKey = '';
   localStorage.removeItem('lectio_azure_key');
   $('azure-key-input').value = '';
   showAzureStatus('Key cleared — using browser TTS');
@@ -2090,7 +2048,6 @@ closeBtn.addEventListener('click', () => {
   readerView.style.display = 'none';
   dropZone.style.display = 'flex';
   state.chapters = [];
-  state.parseComplete = false;
   fileMeta.textContent = 'Drop a PDF or EPUB to begin';
   $('file-input').value = '';
   clearSession();
@@ -2146,11 +2103,18 @@ function showReader() {
 
 function showLoading(msg) {
   loadingMsg.textContent = msg;
+  $('loading-progress-fill').style.width = '0%';
   loadingEl.classList.add('active');
+}
+
+function updateLoadingProgress(msg, pct) {
+  loadingMsg.textContent = msg;
+  $('loading-progress-fill').style.width = (Math.min(pct, 1) * 100) + '%';
 }
 
 function hideLoading() {
   loadingEl.classList.remove('active');
+  $('loading-progress-fill').style.width = '0%';
 }
 
 function showError(msg) {
@@ -2280,30 +2244,28 @@ document.addEventListener('visibilitychange', async () => {
   }
 });
 
-// ─── Lazy file parsing ────────────────────────────────────────────────────────
-// Replaced synchronous parsers with lazy versions that yield first chapters fast
-
+// ─── File parsing ─────────────────────────────────────────────────────────────
 async function handleFile(file) {
   if (!file) return;
   showLoading('Opening book…');
   try {
     const ext = file.name.split('.').pop().toLowerCase();
     state.chapters = [];
-    state.parseComplete = false;
 
     if (ext === 'pdf') {
-      await lazyParsePDF(file);
+      await parsePDF(file);
     } else if (ext === 'epub') {
-      await lazyParseEPUB(file);
+      await parseEPUB(file);
     } else if (ext === 'docx') {
-      await lazyParseDOCX(file);
+      await parseDOCX(file);
     } else {
       throw new Error('Unsupported format. Please use PDF, EPUB, or DOCX.');
     }
 
     fileMeta.textContent = file.name;
-    // Save filename for resume prompt (not raw bytes anymore)
     if (db) await dbPut('files', { id: 'current', name: file.name, type: file.type, data: null });
+    populateChapters();
+    showReader();
 
   } catch (err) {
     hideLoading();
@@ -2311,60 +2273,35 @@ async function handleFile(file) {
   }
 }
 
-// PDF: parse first chunk, show reader, parse rest in background
-async function lazyParsePDF(file) {
+// PDF: full parse with progress bar
+async function parsePDF(file) {
   const buf = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
   const numPages = pdf.numPages;
   const CHUNK = 10;
 
-  // Parse first chunk immediately
-  const firstEnd = Math.min(CHUNK, numPages);
-  let text = '';
-  for (let p = 1; p <= firstEnd; p++) {
-    loadingMsg.textContent = `Reading page ${p} of ${numPages}…`;
-    const page = await pdf.getPage(p);
-    const content = await page.getTextContent();
-    text += content.items.map(i => i.str).join(' ') + '\n\n';
-  }
-  state.chapters.push({
-    title: numPages <= CHUNK ? 'Full Document' : `Pages 1–${firstEnd}`,
-    text: text.trim()
-  });
-
-  // Show reader immediately with first chunk
-  populateChapters(false);
-  showReader();
-
-  // Parse remaining chunks in background
-  for (let start = CHUNK + 1; start <= numPages; start += CHUNK) {
+  for (let start = 1; start <= numPages; start += CHUNK) {
     const end = Math.min(start + CHUNK - 1, numPages);
-    let chunkText = '';
+    let text = '';
     for (let p = start; p <= end; p++) {
+      updateLoadingProgress(`Reading page ${p} of ${numPages}…`, p / numPages);
       const page = await pdf.getPage(p);
       const content = await page.getTextContent();
-      chunkText += content.items.map(i => i.str).join(' ') + '\n\n';
+      text += content.items.map(i => i.str).join(' ') + '\n\n';
     }
     state.chapters.push({
-      title: `Pages ${start}–${end}`,
-      text: chunkText.trim()
+      title: numPages <= CHUNK ? 'Full Document' : `Pages ${start}–${end}`,
+      text: text.trim()
     });
-    addChapterToSelect(state.chapters.length - 1);
-    // Yield to browser between chunks
-    await new Promise(r => setTimeout(r, 0));
   }
-
-  state.parseComplete = true;
   saveParsedChapters().catch(() => {});
-  updateNavButtons();
 }
 
-// EPUB: parse first 2 chapters, show reader, parse rest in background
-async function lazyParseEPUB(file) {
+// EPUB: full parse with progress bar
+async function parseEPUB(file) {
   const buf = await file.arrayBuffer();
   const zip = await JSZip.loadAsync(buf);
 
-  // Read OPF
   let opfPath = '';
   const containerXml = await zip.file('META-INF/container.xml')?.async('text');
   if (containerXml) {
@@ -2406,68 +2343,62 @@ async function lazyParseEPUB(file) {
     }
   }
 
-  // Helper to parse one spine item
-  async function parseSpineItem(item) {
+  for (let i = 0; i < spineItems.length; i++) {
+    const item = spineItems[i];
+    updateLoadingProgress(`Reading chapter ${i + 1} of ${spineItems.length}…`, i / spineItems.length);
     const htmlText = await zip.file(item.href)?.async('text');
-    if (!htmlText) return null;
+    if (!htmlText) continue;
     const doc = parser.parseFromString(htmlText, 'text/html');
     doc.querySelectorAll('script, style, nav').forEach(el => el.remove());
     const text = (doc.body?.innerText || doc.body?.textContent || '').replace(/\s+/g, ' ').trim();
-    if (text.length < 40) return null;
-    const title = tocTitles[item.href] || doc.querySelector('title')?.textContent || null;
-    return { title, text };
-  }
-
-  // Parse first 2 substantive chapters
-  let loaded = 0;
-  let i = 0;
-  while (i < spineItems.length && loaded < 2) {
-    loadingMsg.textContent = `Opening chapter ${loaded + 1}…`;
-    const ch = await parseSpineItem(spineItems[i]);
-    if (ch) {
-      ch.title = ch.title || `Chapter ${state.chapters.length + 1}`;
-      state.chapters.push(ch);
-      loaded++;
-    }
-    i++;
+    if (text.length < 40) continue;
+    const title = tocTitles[item.href] || doc.querySelector('title')?.textContent || `Chapter ${state.chapters.length + 1}`;
+    state.chapters.push({ title, text });
   }
 
   if (!state.chapters.length) throw new Error('No readable content found in EPUB.');
-
-  // Show reader immediately
-  populateChapters(false);
-  showReader();
-
-  // Parse remaining in background
-  for (; i < spineItems.length; i++) {
-    const ch = await parseSpineItem(spineItems[i]);
-    if (ch) {
-      ch.title = ch.title || `Chapter ${state.chapters.length + 1}`;
-      state.chapters.push(ch);
-      addChapterToSelect(state.chapters.length - 1);
-    }
-    // Yield every 3 chapters so UI stays responsive
-    if (i % 3 === 0) await new Promise(r => setTimeout(r, 0));
-  }
-
-  state.parseComplete = true;
   saveParsedChapters().catch(() => {});
-  updateNavButtons();
 }
 
-function addChapterToSelect(index) {
-  const opt = document.createElement('option');
-  opt.value = index;
-  opt.textContent = state.chapters[index].title;
-  chapterSelect.appendChild(opt);
-  updateNavButtons();
+// DOCX: lazy load mammoth then full parse with progress
+let mammothLoaded = false;
+async function loadMammoth() {
+  if (mammothLoaded) return;
+  await new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js';
+    script.onload = resolve;
+    script.onerror = reject;
+    document.head.appendChild(script);
+  });
+  mammothLoaded = true;
 }
 
-function updateNavButtons() {
-  prevCh.disabled = state.currentChapter === 0;
-  nextCh.disabled = state.currentChapter >= state.chapters.length - 1;
+async function parseDOCX(file) {
+  updateLoadingProgress('Loading document parser…', 0);
+  await loadMammoth();
+  updateLoadingProgress('Reading document…', 0.3);
+  const buf    = await file.arrayBuffer();
+  const result = await mammoth.extractRawText({ arrayBuffer: buf });
+  const fullText = result.value.trim();
+  if (!fullText) throw new Error('No readable text found in DOCX.');
+
+  const words = fullText.split(/\s+/);
+  const CHUNK = 800;
+  const totalSections = Math.ceil(words.length / CHUNK);
+
+  for (let i = 0; i < words.length; i += CHUNK) {
+    const sectionNum = Math.floor(i / CHUNK) + 1;
+    updateLoadingProgress(`Processing section ${sectionNum} of ${totalSections}…`, 0.3 + (sectionNum / totalSections) * 0.7);
+    state.chapters.push({
+      title: totalSections === 1 ? 'Full Document' : `Section ${sectionNum} of ${totalSections}`,
+      text: words.slice(i, i + CHUNK).join(' '),
+    });
+  }
+  saveParsedChapters().catch(() => {});
 }
 
+// ─── Restore session ──────────────────────────────────────────────────────────
 // ─── Restore session ──────────────────────────────────────────────────────────
 async function restoreSession() {
   try {
