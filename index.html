@@ -984,7 +984,7 @@ const $ = id => document.getElementById(id);
 // ─── App version ─────────────────────────────────────────────────────────────
 // Bump this (and CACHE in sw.js) with every release so you can see which
 // version the phone is actually running.
-const APP_VERSION = 'v20 · Oct 26';
+const APP_VERSION = 'v21 · Oct 26';
 $('app-version').textContent = APP_VERSION;
 
 const dropZone      = $('drop-zone');
@@ -2475,10 +2475,24 @@ async function handleFile(file) {
 // fragments (font, kerning or style changes), so a space is added only where
 // there is a real gap between fragments, and line ends (hasEOL) are kept so
 // titles stay on their own line. Words hyphenated across a line are rejoined.
-function pdfItemsToText(items) {
-  let out = '', prev = null;
+// Also handles two chapter-opening quirks common in ebooks:
+//  - drop caps: an oversized first letter stored apart from its word ("J" … "ason")
+//  - letter-spaced titles stored as "O F C O U R S E" — restored from the PDF's
+//    table of contents when possible (titleMap), otherwise joined into words
+function pdfItemsToText(items, titleMap = null) {
+  // Typical body text height on this page, to spot oversized drop caps
+  const hs = items.filter(it => (it.str || '').trim().length > 3 && it.height).map(it => it.height).sort((a, b) => a - b);
+  const bodyH = hs.length ? hs[Math.floor(hs.length / 2)] : 0;
+  const isDropCap = it => bodyH && it.height > bodyH * 1.8 && /^["“‘']?[A-Za-z]$/.test((it.str || '').trim());
+
+  let out = '', prev = null, dropCap = '';
   for (const it of items) {
-    const s = it.str || '';
+    let s = it.str || '';
+    if (isDropCap(it)) { dropCap = s.trim(); continue; }
+    if (s.trim() && /^(\S )+\S$/.test(s.trim()) && s.trim().length >= 7) s = unspaceTitle(s.trim(), titleMap);
+    // Attach a held drop cap to the first line of body text that follows it
+    else if (dropCap && /^[a-z’' ]/.test(s) && (!bodyH || it.height <= bodyH * 1.3)) { s = dropCap + s; dropCap = ''; }
+
     if (s && prev && !prev.hasEOL && !/\s$/.test(out) && !/^\s/.test(s)) {
       const t = it.transform, pt = prev.transform;
       const size = it.height || Math.hypot(t[2], t[3]) || 10;
@@ -2490,12 +2504,38 @@ function pdfItemsToText(items) {
     if (it.hasEOL) out += '\n';
     if (s || it.hasEOL) prev = it;
   }
+  if (dropCap) out += '\n' + dropCap; // never lose text
   return out
     .replace(/[ \t]*\n[ \t]*/g, '\n')
     .replace(/[ \t]{2,}/g, ' ')
     // "beauti-\nful" → "beautiful" (only lowercase-to-lowercase, so "Jean-\nPaul" stays)
-    .replace(/([a-z])[-\u00AD]\n([a-z])/g, '$1$2')
+    .replace(/([a-z])[-­]\n([a-z])/g, '$1$2')
     .trim();
+}
+
+// "O F C O U R S E M A G I C" → "Of Course Magic…" using the table of contents.
+// If the title isn't in the contents, split on wider gaps (double spaces) if the
+// PDF has them; otherwise just close up the letters.
+const titleKey = s => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+function unspaceTitle(s, titleMap) {
+  const hit = titleMap && titleMap.get(titleKey(s));
+  if (hit) return hit;
+  if (/\S {2,}\S/.test(s)) return s.split(/ {2,}/).map(w => w.replace(/ /g, '')).join(' ');
+  return s.replace(/ /g, '');
+}
+
+// Build a lookup of chapter titles from the PDF outline (bookmarks)
+async function pdfTitleMap(pdf) {
+  const map = new Map();
+  try {
+    const walk = list => (list || []).forEach(o => {
+      const title = (o.title || '').replace(/^\s*\d+[.:)]\s*/, '').trim();
+      if (title) map.set(titleKey(title), title);
+      walk(o.items);
+    });
+    walk(await pdf.getOutline());
+  } catch {}
+  return map;
 }
 
 // PDF: full parse with progress bar
@@ -2503,6 +2543,7 @@ async function parsePDF(file) {
   const buf = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
   const numPages = pdf.numPages;
+  const titleMap = await pdfTitleMap(pdf);
   const CHUNK = 10;
 
   for (let start = 1; start <= numPages; start += CHUNK) {
@@ -2512,7 +2553,7 @@ async function parsePDF(file) {
       updateLoadingProgress(`Reading page ${p} of ${numPages}…`, p / numPages);
       const page = await pdf.getPage(p);
       const content = await page.getTextContent();
-      text += pdfItemsToText(content.items) + '\n'; // pages often break mid-sentence, so no paragraph gap
+      text += pdfItemsToText(content.items, titleMap) + '\n'; // pages often break mid-sentence, so no paragraph gap
     }
     state.chapters.push({
       title: numPages <= CHUNK ? 'Full Document' : `Pages ${start}–${end}`,
