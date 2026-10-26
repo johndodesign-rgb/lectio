@@ -1,4 +1,4 @@
-const CACHE = 'lectio-v21';
+const CACHE = 'lectio-v22';
 
 const PRECACHE = [
   './',

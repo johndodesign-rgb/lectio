@@ -984,7 +984,7 @@ const $ = id => document.getElementById(id);
 // ─── App version ─────────────────────────────────────────────────────────────
 // Bump this (and CACHE in sw.js) with every release so you can see which
 // version the phone is actually running.
-const APP_VERSION = 'v21 · Oct 26';
+const APP_VERSION = 'v22 · Oct 26';
 $('app-version').textContent = APP_VERSION;
 
 const dropZone      = $('drop-zone');
@@ -1424,12 +1424,15 @@ function segmentForSpeech(text) {
   return units;
 }
 
-// Group units into chunks of about maxWords, only ever breaking between sentences
-function chunkUnits(units, maxWords = 200) {
+// Group units into chunks, only ever breaking between sentences. sizes is a
+// word limit, or a list of limits for successive chunks (the last one repeats).
+function chunkUnits(units, sizes = 200) {
+  const limits = Array.isArray(sizes) ? sizes : [sizes];
   const chunks = [];
   let cur = [], n = 0;
   for (const u of units) {
-    if (cur.length && n + u.words > maxWords) { chunks.push(cur); cur = []; n = 0; }
+    const max = limits[Math.min(chunks.length, limits.length - 1)];
+    if (cur.length && n + u.words > max) { chunks.push(cur); cur = []; n = 0; }
     cur.push(u);
     n += u.words;
   }
@@ -1508,14 +1511,21 @@ let azureAudio      = null;
 let azureChunks     = [];
 let azureChunkIdx   = 0;
 let azureWordOffset = 0;
-let azurePrefetchCache = {}; // map of chunkIdx -> url
+let azurePrefetch   = {}; // map of chunkIdx -> Promise<url>, shared so a chunk is only requested once
 let azureWordTimers = []; // active word highlight timers
+// Bumped on every stop/restart (voice switch, seek, speed change). Replies that
+// arrive for an older session are thrown away instead of being played.
+let azureSession    = 0;
+let azureAbort      = new AbortController();
+// Words per chunk: start small so audio begins quickly, then grow
+const AZURE_CHUNK_SIZES = [30, 80, 200];
 
-async function azureSynthesize(ssml) {
+async function azureSynthesize(ssml, signal) {
   const res = await fetch(
     `https://${azureRegion}.tts.speech.microsoft.com/cognitiveservices/v1`,
     {
       method: 'POST',
+      signal,
       headers: {
         'Ocp-Apim-Subscription-Key': azureKey,
         'Content-Type': 'application/ssml+xml',
@@ -1528,7 +1538,19 @@ async function azureSynthesize(ssml) {
   return URL.createObjectURL(await res.blob());
 }
 
+function fetchAzureChunk(idx) {
+  if (!azurePrefetch[idx]) {
+    const p = azureSynthesize(buildSSML(azureChunks[idx].units, azureVoice), azureAbort.signal);
+    p.catch(() => {}); // errors are handled by whoever plays the chunk
+    azurePrefetch[idx] = p;
+  }
+  return azurePrefetch[idx];
+}
+
 function stopAzure() {
+  azureSession++;
+  azureAbort.abort(); // cancel requests still in flight for the old voice/position
+  azureAbort = new AbortController();
   if (azureAudio) {
     azureAudio.pause();
     azureAudio.src = '';
@@ -1538,8 +1560,8 @@ function stopAzure() {
   azureWordTimers.forEach(t => clearTimeout(t));
   azureWordTimers = [];
   // Revoke all prefetched URLs
-  Object.values(azurePrefetchCache).forEach(url => URL.revokeObjectURL(url));
-  azurePrefetchCache = {};
+  Object.values(azurePrefetch).forEach(p => p.then(url => URL.revokeObjectURL(url)).catch(() => {}));
+  azurePrefetch = {};
   azureChunks    = [];
   azureChunkIdx  = 0;
   azureWordOffset = 0;
@@ -1554,7 +1576,7 @@ async function startAzureSpeech(fromWordIndex = 0) {
   // Chunk at sentence boundaries so no sentence is cut across two requests
   azureChunks = [];
   let wIdx = 0;
-  for (const units of chunkUnits(segmentForSpeech(textToSpeak), 200)) {
+  for (const units of chunkUnits(segmentForSpeech(textToSpeak), AZURE_CHUNK_SIZES)) {
     const words = units.reduce((n, u) => n + u.words, 0);
     azureChunks.push({ units, words, startWordIdx: fromWordIndex + wIdx });
     wIdx += words;
@@ -1566,38 +1588,28 @@ async function startAzureSpeech(fromWordIndex = 0) {
   acquireWakeLock();
   showTeleprompterBand();
 
-  // Pre-fetch chunks 1 and 2 immediately so buffer is ready
-  [1, 2].forEach(idx => {
-    if (idx < azureChunks.length) {
-      const ssml = buildSSML(azureChunks[idx].units, azureVoice);
-      azureSynthesize(ssml).then(url => {
-        if (state.isPlaying) azurePrefetchCache[idx] = url;
-        else URL.revokeObjectURL(url);
-      }).catch(() => {});
-    }
-  });
-
   playNextAzureChunk();
 }
 
 function playNextAzureChunk() {
   if (azureChunkIdx >= azureChunks.length || !state.isPlaying) return;
 
-  const chunk     = azureChunks[azureChunkIdx];
+  const session   = azureSession;
+  const chunkIdx  = azureChunkIdx;
+  const chunk     = azureChunks[chunkIdx];
   const wordsOnly = state.words.filter(w => /\S/.test(w));
   azureWordOffset = chunk.startWordIdx;
-  const ssml = buildSSML(chunk.units, azureVoice);
+  const stale = () => session !== azureSession;
 
-  // Use cached URL if available, otherwise fetch now
-  const urlPromise = azurePrefetchCache[azureChunkIdx]
-    ? Promise.resolve(azurePrefetchCache[azureChunkIdx])
-    : azureSynthesize(ssml);
+  // Request this chunk (or reuse the prefetch) and the next one in parallel
+  const urlPromise = fetchAzureChunk(chunkIdx);
+  if (chunkIdx + 1 < azureChunks.length) fetchAzureChunk(chunkIdx + 1);
 
   urlPromise.then(url => {
     // Remove from cache now that we're using it
-    delete azurePrefetchCache[azureChunkIdx];
+    delete azurePrefetch[chunkIdx];
 
-    if (!state.isPlaying) { URL.revokeObjectURL(url); return; }
+    if (stale() || !state.isPlaying) { URL.revokeObjectURL(url); return; }
 
     azureAudio = new Audio(url);
     // HD voices don't accept <prosody rate>, so speed them up at playback
@@ -1606,19 +1618,8 @@ function playNextAzureChunk() {
       azureAudio.playbackRate = azureSpeedFactor();
     }
 
-    // Pre-fetch N+1 and N+2 while this chunk plays
-    [azureChunkIdx + 1, azureChunkIdx + 2].forEach(prefetchIdx => {
-      if (prefetchIdx < azureChunks.length && !azurePrefetchCache[prefetchIdx]) {
-        const prefetchSSML = buildSSML(azureChunks[prefetchIdx].units, azureVoice);
-        azureSynthesize(prefetchSSML).then(prefetchUrl => {
-          if (state.isPlaying) {
-            azurePrefetchCache[prefetchIdx] = prefetchUrl;
-          } else {
-            URL.revokeObjectURL(prefetchUrl);
-          }
-        }).catch(() => {});
-      }
-    });
+    // Keep two chunks ready ahead of the one playing
+    [chunkIdx + 1, chunkIdx + 2].forEach(i => { if (i < azureChunks.length) fetchAzureChunk(i); });
 
     // Estimate when each word is spoken and follow the audio clock, so the
     // highlight stays in step through pauses, speed changes and pause/resume
@@ -1650,6 +1651,7 @@ function playNextAzureChunk() {
     // Advance only when audio actually finishes
     azureAudio.addEventListener('ended', () => {
       URL.revokeObjectURL(url);
+      if (stale()) return;
       azureAudio = null;
       if (!state.isPlaying) return;
       azureChunkIdx++;
@@ -1685,6 +1687,8 @@ function playNextAzureChunk() {
 
     azureAudio.addEventListener('error', () => {
       URL.revokeObjectURL(url);
+      // Stopping an old chunk (src = '') fires an error; ignore it
+      if (stale()) return;
       azureAudio = null;
       setStatus('audio error — try again');
       state.isPlaying = false;
@@ -1693,12 +1697,14 @@ function playNextAzureChunk() {
     });
 
     azureAudio.play().catch(err => {
+      if (stale() || err.name === 'AbortError') return;
       setStatus('⚠ playback error: ' + err.message);
       state.isPlaying = false;
       playBtn.innerHTML = '&#9654;';
     });
 
   }).catch(err => {
+    if (stale() || err.name === 'AbortError') return;
     setStatus(isHDVoice(azureVoice)
       ? '⚠ HD voice unavailable in this Azure region — pick another voice'
       : '⚠ ' + err.message);
