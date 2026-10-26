@@ -984,7 +984,7 @@ const $ = id => document.getElementById(id);
 // ─── App version ─────────────────────────────────────────────────────────────
 // Bump this (and CACHE in sw.js) with every release so you can see which
 // version the phone is actually running.
-const APP_VERSION = 'v19 · Oct 26';
+const APP_VERSION = 'v20 · Oct 26';
 $('app-version').textContent = APP_VERSION;
 
 const dropZone      = $('drop-zone');
@@ -2471,6 +2471,33 @@ async function handleFile(file) {
   }
 }
 
+// Join PDF.js text fragments into lines. PDFs often split one word into several
+// fragments (font, kerning or style changes), so a space is added only where
+// there is a real gap between fragments, and line ends (hasEOL) are kept so
+// titles stay on their own line. Words hyphenated across a line are rejoined.
+function pdfItemsToText(items) {
+  let out = '', prev = null;
+  for (const it of items) {
+    const s = it.str || '';
+    if (s && prev && !prev.hasEOL && !/\s$/.test(out) && !/^\s/.test(s)) {
+      const t = it.transform, pt = prev.transform;
+      const size = it.height || Math.hypot(t[2], t[3]) || 10;
+      const sameLine = Math.abs(t[5] - pt[5]) < size * 0.5;
+      const gap = t[4] - (pt[4] + (prev.width || 0));
+      if (!sameLine || gap > size * 0.15) out += ' ';
+    }
+    out += s;
+    if (it.hasEOL) out += '\n';
+    if (s || it.hasEOL) prev = it;
+  }
+  return out
+    .replace(/[ \t]*\n[ \t]*/g, '\n')
+    .replace(/[ \t]{2,}/g, ' ')
+    // "beauti-\nful" → "beautiful" (only lowercase-to-lowercase, so "Jean-\nPaul" stays)
+    .replace(/([a-z])[-\u00AD]\n([a-z])/g, '$1$2')
+    .trim();
+}
+
 // PDF: full parse with progress bar
 async function parsePDF(file) {
   const buf = await file.arrayBuffer();
@@ -2485,12 +2512,7 @@ async function parsePDF(file) {
       updateLoadingProgress(`Reading page ${p} of ${numPages}…`, p / numPages);
       const page = await pdf.getPage(p);
       const content = await page.getTextContent();
-      // Keep line ends (hasEOL) so titles and headings stay on their own lines
-      text += content.items
-        .map(i => i.str + (i.hasEOL ? '\n' : ''))
-        .join(' ')
-        .replace(/[ \t]*\n[ \t]*/g, '\n')
-        .replace(/\s+$/, '') + '\n'; // pages often break mid-sentence, so no paragraph gap
+      text += pdfItemsToText(content.items) + '\n'; // pages often break mid-sentence, so no paragraph gap
     }
     state.chapters.push({
       title: numPages <= CHUNK ? 'Full Document' : `Pages ${start}–${end}`,
