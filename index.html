@@ -1278,6 +1278,23 @@ function escHtml(str) {
 
 // ─── Azure TTS ────────────────────────────────────────────────────────────────
 const AZURE_VOICES = [
+  // HD voices: most expressive; choose tone from context. Not in every Azure region.
+  { name: 'Andrew', locale: 'en-US', id: 'en-US-Andrew:DragonHDLatestNeural', desc: 'US Male', tier: 'HD' },
+  { name: 'Ava',    locale: 'en-US', id: 'en-US-Ava:DragonHDLatestNeural',    desc: 'US Female',  tier: 'HD' },
+  { name: 'Brian',  locale: 'en-US', id: 'en-US-Brian:DragonHDLatestNeural',  desc: 'US Male',        tier: 'HD' },
+  { name: 'Emma',   locale: 'en-US', id: 'en-US-Emma:DragonHDLatestNeural',   desc: 'US Female',      tier: 'HD' },
+  { name: 'Davis',  locale: 'en-US', id: 'en-US-Davis:DragonHDLatestNeural',  desc: 'US Male',                tier: 'HD' },
+  { name: 'Aria',   locale: 'en-US', id: 'en-US-Aria:DragonHDLatestNeural',   desc: 'US Female',              tier: 'HD' },
+  { name: 'Jenny',  locale: 'en-US', id: 'en-US-Jenny:DragonHDLatestNeural',  desc: 'US Female',              tier: 'HD' },
+  { name: 'Ada',    locale: 'en-GB', id: 'en-GB-Ada:DragonHDLatestNeural',    desc: 'British Female',         tier: 'HD' },
+  { name: 'Ollie',  locale: 'en-GB', id: 'en-GB-Ollie:DragonHDLatestNeural',  desc: 'British Male',           tier: 'HD' },
+  { name: 'Ryan',   locale: 'en-GB', id: 'en-GB-Ryan:DragonHDLatestNeural',   desc: 'British Male (preview)', tier: 'HD' },
+  // Multilingual voices: more natural than the classic ones, widely available
+  { name: 'Andrew', locale: 'en-US', id: 'en-US-AndrewMultilingualNeural', desc: 'US Male, natural',   tier: 'PLUS' },
+  { name: 'Ava',    locale: 'en-US', id: 'en-US-AvaMultilingualNeural',    desc: 'US Female, natural', tier: 'PLUS' },
+  { name: 'Brian',  locale: 'en-US', id: 'en-US-BrianMultilingualNeural',  desc: 'US Male, natural',   tier: 'PLUS' },
+  { name: 'Emma',   locale: 'en-US', id: 'en-US-EmmaMultilingualNeural',   desc: 'US Female, natural', tier: 'PLUS' },
+  // Classic neural voices
   { name: 'Ryan',    locale: 'en-GB', id: 'en-GB-RyanNeural',    desc: 'British Male' },
   { name: 'Sonia',   locale: 'en-GB', id: 'en-GB-SoniaNeural',   desc: 'British Female' },
   { name: 'Libby',   locale: 'en-GB', id: 'en-GB-LibbyNeural',   desc: 'British Female' },
@@ -1298,38 +1315,170 @@ let azureVoice  = localStorage.getItem('lectio_azure_voice')  || 'en-GB-RyanNeur
 
 function azureEnabled() { return !!azureKey; }
 
-// ─── SSML builder with real prosody ──────────────────────────────────────────
-function buildSSML(text, voice) {
-  const rate = parseFloat(rateSlider.value);
+// ─── Speech segmentation: sentences, headings and pauses ─────────────────────
+// Pause lengths in milliseconds. Tune these to taste.
+const PAUSE_MS = {
+  sentence:  0,     // <s> boundaries already give a natural sentence pause
+  paragraph: 600,
+  heading:   1000,  // after a title or heading line
+  scene:     1000,  // after a * * * style scene break
+  dash:      150,   // an em dash in the middle of a sentence
+};
 
-  // Escape XML entities
-  let escaped = text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+const SCENE_BREAK_RE = /^[ \t]*(?:[*\-~_=#•·⁂][ \t]*)+$/;
+// A line "ends" if it finishes with sentence punctuation, a colon/semicolon or a
+// broken-off dash, optionally followed by closing quotes or brackets.
+const TERMINAL_RE = /[.!?…:;—–]["'”’»)\]]*$/;
+const STARTS_SENTENCE_RE = /^["“'‘(\[]?[A-Z0-9]/;
+const ABBREVIATIONS = new Set([
+  'mr','mrs','ms','dr','st','mt','jr','sr','vs','etc','prof','gen','col','capt',
+  'lt','sgt','rev','fig','vol','ch','pp','e.g','i.e','a.m','p.m','u.s','u.k',
+  'inc','co','ltd','ave','approx','no','op','cf',
+]);
 
-  // Apply real SSML prosody for questions and exclamations
-  // Wrap sentences ending in ? with rising pitch
-  escaped = escaped.replace(
-    /([^.!?]+\?)/g,
-    '<prosody pitch="+12%" rate="-5%">$1</prosody>'
-  );
-  // Wrap sentences ending in ! with emphasis
-  escaped = escaped.replace(
-    /([^.!?]+!)/g,
-    '<prosody pitch="+8%" volume="+10%">$1</prosody>'
-  );
+function countWords(s) { return s.split(/\s+/).filter(Boolean).length; }
 
-  return `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="http://www.w3.org/2001/mstts" xml:lang="en-US">
-  <voice name="${voice}">
-    <mstts:express-as style="narration-professional">
-      <prosody rate="${((rate - 1) * 50).toFixed(0)}%">
-        ${escaped}
-      </prosody>
-    </mstts:express-as>
-  </voice>
-</speak>`;
+// Split a stretch of prose into sentences. Breaks after . ! ? … or a broken-off
+// dash when the next word starts like a new sentence, skipping abbreviations
+// (Mr., Dr., e.g.) and initials (J. R. R.).
+function splitSentences(text) {
+  const out = [];
+  const re = /([.!?…]+|[—–])(["'”’»)\]]*)\s+(?=["“'‘(\[]?[A-Z0-9])/g;
+  let start = 0, m;
+  while ((m = re.exec(text))) {
+    if (m[1] === '.') {
+      const prev = text.slice(start, m.index).split(/\s+/).pop().replace(/^["“'‘(\[]+/, '');
+      if (ABBREVIATIONS.has(prev.toLowerCase()) || /^[A-Za-z]$/.test(prev)) continue;
+    }
+    const end = m.index + m[1].length + m[2].length;
+    const s = text.slice(start, end).trim();
+    if (s) out.push(s);
+    start = m.index + m[0].length;
+  }
+  const rest = text.slice(start).trim();
+  if (rest) out.push(rest);
+  return out;
+}
+
+// Turn cleaned text into speakable units: one per sentence or heading, each with
+// its word count and the pause that should follow it. Only whitespace is
+// regrouped, so word counts still line up with the on-screen words.
+function segmentForSpeech(text) {
+  const units = [];
+  const unit = (t, pause, silent = false) => units.push({ text: t, words: countWords(t), pause, silent });
+
+  for (const para of text.split(/\n[ \t]*\n/)) {
+    const lines = para.split('\n').map(l => l.trim()).filter(Boolean);
+    let run = ''; // consecutive lines that flow together as prose
+    const flush = (pause) => {
+      if (!run) return;
+      const sents = splitSentences(run);
+      sents.forEach((s, i) => unit(s, i === sents.length - 1 ? pause : PAUSE_MS.sentence));
+      run = '';
+    };
+
+    lines.forEach((line, i) => {
+      if (SCENE_BREAK_RE.test(line)) {
+        flush(PAUSE_MS.paragraph);
+        unit(line, PAUSE_MS.scene, true);
+        return;
+      }
+      const next     = lines[i + 1];
+      const terminal = TERMINAL_RE.test(line);
+      const short    = countWords(line) <= 8;
+      // A short unpunctuated line that starts fresh and is followed by a new
+      // sentence is a title or heading (e.g. "Chapter Three" then "The rain…")
+      if (!run && !terminal && short && (!next || STARTS_SENTENCE_RE.test(next))) {
+        unit(line, PAUSE_MS.heading);
+        return;
+      }
+      run = run ? run + ' ' + line : line;
+      // A line that ends a sentence closes the run; one that doesn't is a
+      // wrapped line and continues into the next
+      if (next && terminal) flush(PAUSE_MS.sentence);
+    });
+    flush(PAUSE_MS.paragraph);
+  }
+  return units;
+}
+
+// Group units into chunks of about maxWords, only ever breaking between sentences
+function chunkUnits(units, maxWords = 200) {
+  const chunks = [];
+  let cur = [], n = 0;
+  for (const u of units) {
+    if (cur.length && n + u.words > maxWords) { chunks.push(cur); cur = []; n = 0; }
+    cur.push(u);
+    n += u.words;
+  }
+  if (cur.length) chunks.push(cur);
+  return chunks;
+}
+
+// Estimate when each word starts (ms into the chunk audio). Explicit breaks are
+// known exactly; the remaining time is shared out by word length, with a little
+// extra after each sentence for the voice's own sentence pause.
+function estimateWordStarts(units, durationMs) {
+  const SENTENCE_GAP = 6; // in "characters" of speaking time
+  let breakMs = 0, weight = 0;
+  for (const u of units) {
+    breakMs += Math.min(u.pause, 5000);
+    if (u.silent) continue;
+    for (const w of u.text.split(/\s+/).filter(Boolean)) weight += w.length + 1;
+    weight += SENTENCE_GAP;
+  }
+  const speechMs = Math.max(durationMs - breakMs, durationMs * 0.4);
+  const k = weight ? speechMs / weight : 0;
+  const starts = [];
+  let t = 0;
+  for (const u of units) {
+    const words = u.text.split(/\s+/).filter(Boolean);
+    for (const w of words) {
+      starts.push(t);
+      if (!u.silent) t += (w.length + 1) * k;
+    }
+    if (!u.silent) t += SENTENCE_GAP * k;
+    t += Math.min(u.pause, 5000);
+  }
+  return starts;
+}
+
+// ─── SSML builder ─────────────────────────────────────────────────────────────
+// HD voices pick their own tone from context and ignore <prosody>/<express-as>
+function isHDVoice(id) { return id.includes(':DragonHD'); }
+
+// Slider 1.0 = normal. Matches the old prosody mapping (1.5× → +25%).
+function azureSpeedFactor() { return 1 + (parseFloat(rateSlider.value) - 1) * 0.5; }
+
+function escapeXml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function unitToSSML(u) {
+  let out = '';
+  if (!u.silent) {
+    const t = escapeXml(u.text)
+      // "end.Next" with no space (common in PDFs)
+      .replace(/([a-z][.!?])(?=[A-Z])/g, '$1 ')
+      // em/en dash mid-sentence → short breath (a dash ending the sentence stays)
+      .replace(/\s*[—–]\s*(?=[A-Za-z0-9])/g, ` <break time="${PAUSE_MS.dash}ms"/> `);
+    out = `<s>${t}</s>`;
+  }
+  if (u.pause) out += `<break time="${Math.min(u.pause, 5000)}ms"/>`;
+  return out;
+}
+
+function buildSSML(textOrUnits, voice) {
+  const units = typeof textOrUnits === 'string' ? segmentForSpeech(textOrUnits) : textOrUnits;
+  const body  = units.map(unitToSSML).join('\n');
+  const open  = `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="http://www.w3.org/2001/mstts" xml:lang="en-US">`;
+
+  if (isHDVoice(voice)) {
+    // Speed for HD voices is applied with audio.playbackRate instead
+    return `${open}<voice name="${voice}">${body}</voice></speak>`;
+  }
+  const pct = ((azureSpeedFactor() - 1) * 100).toFixed(0);
+  return `${open}<voice name="${voice}"><mstts:express-as style="narration-professional"><prosody rate="${pct}%">${body}</prosody></mstts:express-as></voice></speak>`;
 }
 
 // ─── Azure REST playback ──────────────────────────────────────────────────────
@@ -1377,20 +1526,16 @@ function stopAzure() {
 async function startAzureSpeech(fromWordIndex = 0) {
   stopAzure();
 
-  const fullText    = getSpeakableText();
-  const wordsOnly   = state.words.filter(w => /\S/.test(w));
-  const fromChar    = getCharOffset(state.words, fromWordIndex);
-  const textToSpeak = fullText.slice(fromChar);
+  const textToSpeak = getSpeakableText(fromWordIndex);
   if (!textToSpeak.trim()) { setStatus('done'); return; }
 
-  const words = textToSpeak.split(/\s+/).filter(Boolean);
-  const CHUNK = 200;
+  // Chunk at sentence boundaries so no sentence is cut across two requests
   azureChunks = [];
   let wIdx = 0;
-  for (let i = 0; i < words.length; i += CHUNK) {
-    const slice = words.slice(i, i + CHUNK);
-    azureChunks.push({ text: slice.join(' '), startWordIdx: fromWordIndex + wIdx });
-    wIdx += slice.length;
+  for (const units of chunkUnits(segmentForSpeech(textToSpeak), 200)) {
+    const words = units.reduce((n, u) => n + u.words, 0);
+    azureChunks.push({ units, words, startWordIdx: fromWordIndex + wIdx });
+    wIdx += words;
   }
 
   state.isPlaying = true;
@@ -1402,7 +1547,7 @@ async function startAzureSpeech(fromWordIndex = 0) {
   // Pre-fetch chunks 1 and 2 immediately so buffer is ready
   [1, 2].forEach(idx => {
     if (idx < azureChunks.length) {
-      const ssml = buildSSML(azureChunks[idx].text, azureVoice);
+      const ssml = buildSSML(azureChunks[idx].units, azureVoice);
       azureSynthesize(ssml).then(url => {
         if (state.isPlaying) azurePrefetchCache[idx] = url;
         else URL.revokeObjectURL(url);
@@ -1419,7 +1564,7 @@ function playNextAzureChunk() {
   const chunk     = azureChunks[azureChunkIdx];
   const wordsOnly = state.words.filter(w => /\S/.test(w));
   azureWordOffset = chunk.startWordIdx;
-  const ssml = buildSSML(chunk.text, azureVoice);
+  const ssml = buildSSML(chunk.units, azureVoice);
 
   // Use cached URL if available, otherwise fetch now
   const urlPromise = azurePrefetchCache[azureChunkIdx]
@@ -1433,11 +1578,16 @@ function playNextAzureChunk() {
     if (!state.isPlaying) { URL.revokeObjectURL(url); return; }
 
     azureAudio = new Audio(url);
+    // HD voices don't accept <prosody rate>, so speed them up at playback
+    if (isHDVoice(azureVoice)) {
+      azureAudio.preservesPitch = true;
+      azureAudio.playbackRate = azureSpeedFactor();
+    }
 
     // Pre-fetch N+1 and N+2 while this chunk plays
     [azureChunkIdx + 1, azureChunkIdx + 2].forEach(prefetchIdx => {
       if (prefetchIdx < azureChunks.length && !azurePrefetchCache[prefetchIdx]) {
-        const prefetchSSML = buildSSML(azureChunks[prefetchIdx].text, azureVoice);
+        const prefetchSSML = buildSSML(azureChunks[prefetchIdx].units, azureVoice);
         azureSynthesize(prefetchSSML).then(prefetchUrl => {
           if (state.isPlaying) {
             azurePrefetchCache[prefetchIdx] = prefetchUrl;
@@ -1448,26 +1598,31 @@ function playNextAzureChunk() {
       }
     });
 
-    // Estimate word highlights by timing
-    azureAudio.addEventListener('loadedmetadata', () => {
-      const dur        = azureAudio.duration * 1000;
-      const chunkWords = chunk.text.split(/\s+/).filter(Boolean);
-      const msPerWord  = dur / chunkWords.length;
-      // Clear any previous timers before setting new ones
-      azureWordTimers.forEach(t => clearTimeout(t));
-      azureWordTimers = [];
-      chunkWords.forEach((_, i) => {
-        const t = setTimeout(() => {
-          if (!state.isPlaying) return;
-          const idx = azureWordOffset + i;
-          state.wordIndex = idx;
-          renderText(idx);
-          scrollToHighlight();
-          const progress = ((idx + 1) / wordsOnly.length) * 100;
-          progressFill.style.width = Math.min(progress, 100) + '%';
-        }, i * msPerWord);
-        azureWordTimers.push(t);
-      });
+    // Estimate when each word is spoken and follow the audio clock, so the
+    // highlight stays in step through pauses, speed changes and pause/resume
+    const audioEl = azureAudio;
+    audioEl.addEventListener('loadedmetadata', () => {
+      const starts = estimateWordStarts(chunk.units, audioEl.duration * 1000);
+      let last = -1;
+      const tick = () => {
+        if (audioEl !== azureAudio) return; // chunk finished or playback stopped
+        if (!audioEl.paused && state.isPlaying) {
+          const now = audioEl.currentTime * 1000;
+          let i = last < 0 ? 0 : last;
+          while (i + 1 < starts.length && starts[i + 1] <= now) i++;
+          if (i !== last && starts.length) {
+            last = i;
+            const idx = azureWordOffset + i;
+            state.wordIndex = idx;
+            renderText(idx);
+            scrollToHighlight();
+            const progress = ((idx + 1) / wordsOnly.length) * 100;
+            progressFill.style.width = Math.min(progress, 100) + '%';
+          }
+        }
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
     });
 
     // Advance only when audio actually finishes
@@ -1522,7 +1677,9 @@ function playNextAzureChunk() {
     });
 
   }).catch(err => {
-    setStatus('⚠ ' + err.message);
+    setStatus(isHDVoice(azureVoice)
+      ? '⚠ HD voice unavailable in this Azure region — pick another voice'
+      : '⚠ ' + err.message);
     state.isPlaying = false;
     playBtn.innerHTML = '&#9654;';
     releaseWakeLock();
@@ -1542,7 +1699,7 @@ function renderAzureVoiceList() {
         <div class="voice-name">${v.name}</div>
         <div class="voice-meta">${v.desc} · ${v.locale}</div>
       </div>
-      <span class="voice-badge azure-badge">AZURE</span>
+      <span class="voice-badge azure-badge">${v.tier || 'AZURE'}</span>
     `;
     row.addEventListener('click', e => {
       if (e.target.closest('.voice-preview-btn')) return;
@@ -1561,9 +1718,15 @@ function renderAzureVoiceList() {
         const previewSSML = buildSSML('The quick brown fox jumps over the lazy dog.', v.id);
         const url = await azureSynthesize(previewSSML);
         const audio = new Audio(url);
+        if (isHDVoice(v.id)) { audio.preservesPitch = true; audio.playbackRate = azureSpeedFactor(); }
         audio.play();
         audio.onended = () => { URL.revokeObjectURL(url); btn.textContent = '▶'; };
-      } catch { btn.textContent = '▶'; }
+      } catch (err) {
+        btn.textContent = '▶';
+        showAzureStatus(isHDVoice(v.id)
+          ? `⚠ ${v.name} HD isn't available in region "${azureRegion}"`
+          : `⚠ Preview failed (${err.message})`);
+      }
     });
     list.appendChild(row);
   });
@@ -1635,7 +1798,7 @@ function showAzureStatus(msg) {
 function updatePickerLabel() {
   if (azureEnabled()) {
     const v = AZURE_VOICES.find(v => v.id === azureVoice);
-    $('voice-picker-label').textContent = v ? `Azure · ${v.name}` : 'Azure TTS';
+    $('voice-picker-label').textContent = v ? `Azure · ${v.name}${v.tier ? ' ' + v.tier : ''}` : 'Azure TTS';
   } else {
     const v = allVoices.find(v => v.voiceURI === selectedVoiceURI);
     $('voice-picker-label').textContent = v ? shortName(v.name) : 'Choose voice';
@@ -1764,38 +1927,41 @@ function addPronunEntry() {
 loadPronunDict();
 
 // ─── Speech synthesis ─────────────────────────────────────────────────────────
+// Strip markdown-style symbols that TTS would read aloud. Line breaks are kept
+// (they mark headings and paragraphs) and scene-break lines are left in place
+// for segmentForSpeech to turn into a pause.
 function cleanText(text) {
-  return text
-    // Remove standalone punctuation clusters used as scene breaks (e.g. *** --- ~~~ ___)
-    .replace(/^\s*([*\-~_=#]+)\s*$/gm, ' ')
-    // Remove inline asterisks/underscores used for bold/italic markdown
-    .replace(/\*{1,3}([^*]+)\*{1,3}/g, '$1')
-    .replace(/_{1,3}([^_]+)_{1,3}/g, '$1')
-    // Remove leftover standalone symbols that TTS would read aloud
-    .replace(/\*/g, '')
-    .replace(/~{2,}/g, '')
-    .replace(/#{1,6}\s/g, '') // markdown headers
-    // Collapse multiple blank lines into one pause
-    .replace(/\n{3,}/g, '\n\n')
-    // ── Prosody nudges ──
-    // Questions: add a brief pause before ? to encourage rising inflection
-    .replace(/(\w)\?/g, '$1,?')
-    // Exclamations: add comma before ! for a beat of emphasis
-    .replace(/(\w)!/g, '$1,!')
-    // Ellipses: ensure they get a proper pause
-    .replace(/\.{3}/g, '... ')
-    // Em dashes: replace with comma-pause for natural break
-    .replace(/—/g, ', ')
-    .replace(/–/g, ', ')
-    // Ensure periods are followed by a space so TTS pauses correctly
-    .replace(/\.(?=[A-Z])/g, '. ')
-    // Ensure closing punctuation followed by opening quote gets a space
-    .replace(/([.!?,;])([""''])/g, '$1 $2');
+  return text.split('\n').map(line => {
+    if (SCENE_BREAK_RE.test(line)) return line;
+    return line
+      .replace(/\*{1,3}(\S(?:[^*]*?\S)?)\*{1,3}/g, '$1')
+      .replace(/_{1,3}(\S(?:[^_]*?\S)?)_{1,3}/g, '$1')
+      .replace(/\*/g, '')
+      .replace(/~{2,}/g, '')
+      .replace(/^#{1,6}\s+/, '');
+  }).join('\n').replace(/\n{3,}/g, '\n\n');
 }
 
-function getSpeakableText() {
+// Text to speak from a given on-screen word onward. The start is found in the
+// raw chapter text (which the on-screen words come from) before cleaning, so
+// the starting point stays exact.
+function getSpeakableText(fromWordIndex = 0) {
   const raw = state.chapters[state.currentChapter].text;
-  return applyPronunciation(cleanText(raw));
+  const fromChar = getCharOffset(state.words, fromWordIndex);
+  return applyPronunciation(cleanText(raw.slice(fromChar)));
+}
+
+// Browser voices can't take SSML, so mark the same structure with punctuation:
+// headings and paragraph ends get a period, scene breaks are dropped and dashes
+// become commas. Returns sentence-sized pieces.
+function browserSentences(text) {
+  return segmentForSpeech(text)
+    .filter(u => !u.silent)
+    .map(u => {
+      let t = u.text.replace(/\s*[—–]\s*(?=[A-Za-z0-9])/g, ', ');
+      if (u.pause >= PAUSE_MS.paragraph && !TERMINAL_RE.test(t)) t += '.';
+      return t;
+    });
 }
 
 function startSpeech(fromWordIndex = 0) {
@@ -1810,25 +1976,27 @@ function startSpeech(fromWordIndex = 0) {
 function browserStartSpeech(fromWordIndex = 0) {
   speechSynthesis.cancel();
 
-  const fullText = getSpeakableText();
   const wordsOnly = state.words.filter(w => /\S/.test(w));
-  const fromChar = getCharOffset(state.words, fromWordIndex);
-  const textToSpeak = fullText.slice(fromChar);
+  const textToSpeak = getSpeakableText(fromWordIndex);
 
   if (!textToSpeak.trim()) {
     setStatus('done');
     return;
   }
 
-  // iOS: chunk into ~200-word pieces — iOS Safari silently drops long utterances
+  // iOS: chunk into ~200-word pieces — iOS Safari silently drops long utterances.
+  // Chunks break only between sentences.
   const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
   const chunkWords = isIOS ? 200 : 999999;
-  const allWords = textToSpeak.split(/\s+/);
-
   const chunks = [];
-  for (let i = 0; i < allWords.length; i += chunkWords) {
-    chunks.push(allWords.slice(i, i + chunkWords).join(' '));
+  let cur = [], curWords = 0;
+  for (const s of browserSentences(textToSpeak)) {
+    const n = countWords(s);
+    if (cur.length && curWords + n > chunkWords) { chunks.push(cur.join(' ')); cur = []; curWords = 0; }
+    cur.push(s);
+    curWords += n;
   }
+  if (cur.length) chunks.push(cur.join(' '));
 
   let chunkIdx = 0;
   let localWordIdx = fromWordIndex;
@@ -2295,7 +2463,12 @@ async function parsePDF(file) {
       updateLoadingProgress(`Reading page ${p} of ${numPages}…`, p / numPages);
       const page = await pdf.getPage(p);
       const content = await page.getTextContent();
-      text += content.items.map(i => i.str).join(' ') + '\n\n';
+      // Keep line ends (hasEOL) so titles and headings stay on their own lines
+      text += content.items
+        .map(i => i.str + (i.hasEOL ? '\n' : ''))
+        .join(' ')
+        .replace(/[ \t]*\n[ \t]*/g, '\n')
+        .replace(/\s+$/, '') + '\n'; // pages often break mid-sentence, so no paragraph gap
     }
     state.chapters.push({
       title: numPages <= CHUNK ? 'Full Document' : `Pages ${start}–${end}`,
@@ -2358,7 +2531,7 @@ async function parseEPUB(file) {
     if (!htmlText) continue;
     const doc = parser.parseFromString(htmlText, 'text/html');
     doc.querySelectorAll('script, style, nav').forEach(el => el.remove());
-    const text = (doc.body?.innerText || doc.body?.textContent || '').replace(/\s+/g, ' ').trim();
+    const text = doc.body ? htmlToStructuredText(doc.body) : '';
     if (text.length < 40) continue;
     const title = tocTitles[item.href] || doc.querySelector('title')?.textContent || `Chapter ${state.chapters.length + 1}`;
     state.chapters.push({ title, text });
@@ -2366,6 +2539,37 @@ async function parseEPUB(file) {
 
   if (!state.chapters.length) throw new Error('No readable content found in EPUB.');
   saveParsedChapters().catch(() => {});
+}
+
+// Turn an XHTML chapter body into text that keeps its block structure:
+// every heading, paragraph and list item becomes its own paragraph (blank line
+// between), <br> stays a line break, and <hr> becomes a scene break.
+function htmlToStructuredText(body) {
+  const BLOCK = /^(P|DIV|H[1-6]|LI|BLOCKQUOTE|SECTION|ARTICLE|HEADER|FOOTER|ASIDE|FIGCAPTION|FIGURE|PRE|UL|OL|DL|DT|DD|TABLE|TR|TD|TH|CENTER)$/;
+  const BR_MARK = '';
+  const out = [];
+  let buf = '';
+  const flush = () => {
+    const t = buf.replace(/\s+/g, ' ')
+      .replace(new RegExp(` ?${BR_MARK} ?`, 'g'), '\n')
+      .replace(/^\n+|\n+$/g, '')
+      .trim();
+    if (t) out.push(t);
+    buf = '';
+  };
+  (function walk(node) {
+    for (const child of node.childNodes) {
+      if (child.nodeType === 3) { buf += child.nodeValue; continue; }
+      if (child.nodeType !== 1) continue;
+      const tag = child.tagName.toUpperCase();
+      if (tag === 'BR') { buf += BR_MARK; continue; }
+      if (tag === 'HR') { flush(); out.push('* * *'); continue; }
+      if (BLOCK.test(tag)) { flush(); walk(child); flush(); }
+      else walk(child);
+    }
+  })(body);
+  flush();
+  return out.join('\n\n');
 }
 
 // DOCX: lazy load mammoth then full parse with progress
@@ -2391,18 +2595,26 @@ async function parseDOCX(file) {
   const fullText = result.value.trim();
   if (!fullText) throw new Error('No readable text found in DOCX.');
 
-  const words = fullText.split(/\s+/);
+  // Group whole paragraphs into ~800-word sections so line breaks survive
   const CHUNK = 800;
-  const totalSections = Math.ceil(words.length / CHUNK);
-
-  for (let i = 0; i < words.length; i += CHUNK) {
-    const sectionNum = Math.floor(i / CHUNK) + 1;
-    updateLoadingProgress(`Processing section ${sectionNum} of ${totalSections}…`, 0.3 + (sectionNum / totalSections) * 0.7);
-    state.chapters.push({
-      title: totalSections === 1 ? 'Full Document' : `Section ${sectionNum} of ${totalSections}`,
-      text: words.slice(i, i + CHUNK).join(' '),
-    });
+  const paras = fullText.split(/\n\s*\n/).map(p => p.trim()).filter(Boolean);
+  const sections = [];
+  let cur = [], curWords = 0;
+  for (const p of paras) {
+    const n = p.split(/\s+/).length;
+    if (curWords && curWords + n > CHUNK) { sections.push(cur.join('\n\n')); cur = []; curWords = 0; }
+    cur.push(p);
+    curWords += n;
   }
+  if (cur.length) sections.push(cur.join('\n\n'));
+
+  sections.forEach((text, i) => {
+    updateLoadingProgress(`Processing section ${i + 1} of ${sections.length}…`, 0.3 + ((i + 1) / sections.length) * 0.7);
+    state.chapters.push({
+      title: sections.length === 1 ? 'Full Document' : `Section ${i + 1} of ${sections.length}`,
+      text,
+    });
+  });
   saveParsedChapters().catch(() => {});
 }
 
