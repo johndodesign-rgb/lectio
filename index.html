@@ -49,6 +49,7 @@
   #app {
     display: grid;
     grid-template-rows: auto 1fr auto;
+    grid-template-columns: minmax(0, 1fr);
     height: 100vh;
     max-width: 860px;
     margin: 0 auto;
@@ -73,6 +74,17 @@
   }
 
   .wordmark span { font-style: italic; font-weight: 400; }
+
+  .brand { display: flex; align-items: baseline; gap: 10px; flex-shrink: 0; }
+  header #file-meta { min-width: 0; margin-left: 12px; }
+  #app-version {
+    font-family: 'DM Mono', monospace;
+    font-size: .6rem;
+    letter-spacing: .05em;
+    color: var(--text-dim);
+    opacity: .7;
+    white-space: nowrap;
+  }
 
   #file-meta {
     font-family: 'DM Mono', monospace;
@@ -820,7 +832,10 @@
 
 <div id="app">
   <header>
-    <div class="wordmark">Le<span>c</span>tio</div>
+    <div class="brand">
+      <div class="wordmark">Le<span>c</span>tio</div>
+      <div id="app-version" title="App version"></div>
+    </div>
     <div id="file-meta">Drop a PDF or EPUB to begin</div>
   </header>
 
@@ -965,6 +980,13 @@ const state = {
 
 // ─── Refs ─────────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
+
+// ─── App version ─────────────────────────────────────────────────────────────
+// Bump this (and CACHE in sw.js) with every release so you can see which
+// version the phone is actually running.
+const APP_VERSION = 'v19 · Oct 26';
+$('app-version').textContent = APP_VERSION;
+
 const dropZone      = $('drop-zone');
 const readerView    = $('reader-view');
 const textContent   = $('text-content');
