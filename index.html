@@ -984,7 +984,7 @@ const $ = id => document.getElementById(id);
 // ─── App version ─────────────────────────────────────────────────────────────
 // Bump this (and CACHE in sw.js) with every release so you can see which
 // version the phone is actually running.
-const APP_VERSION = 'v24 · Oct 28';
+const APP_VERSION = 'v25 · Oct 28';
 $('app-version').textContent = APP_VERSION;
 
 const dropZone      = $('drop-zone');
@@ -1338,7 +1338,7 @@ let azureVoice  = localStorage.getItem('lectio_azure_voice')  || 'en-GB-RyanNeur
 // Lectio key server (Cloudflare Worker, see worker/lectio-tts.js). It holds the
 // Azure key, so devices don't need one. A key typed into ⚙ on a device still
 // takes priority on that device.
-const KEY_SERVER_URL = '';
+const KEY_SERVER_URL = 'https://lectio-tts.johndo-design.workers.dev';
 
 function usingKeyServer() { return !azureKey && !!KEY_SERVER_URL; }
 function azureEnabled() { return !!azureKey || !!KEY_SERVER_URL; }
