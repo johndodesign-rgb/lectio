@@ -984,7 +984,7 @@ const $ = id => document.getElementById(id);
 // ─── App version ─────────────────────────────────────────────────────────────
 // Bump this (and CACHE in sw.js) with every release so you can see which
 // version the phone is actually running.
-const APP_VERSION = 'v22 · Oct 26';
+const APP_VERSION = 'v23 · Oct 28';
 $('app-version').textContent = APP_VERSION;
 
 const dropZone      = $('drop-zone');
@@ -1483,6 +1483,9 @@ function unitToSSML(u) {
   let out = '';
   if (!u.silent) {
     const t = escapeXml(u.text)
+      // HD voices treat [square brackets] as style/sound cues ("[excited]") and
+      // skip the words inside, so drop the brackets and read the words
+      .replace(/[\[\]]/g, '')
       // "end.Next" with no space (common in PDFs)
       .replace(/([a-z][.!?])(?=[A-Z])/g, '$1 ')
       // em/en dash mid-sentence → short breath (a dash ending the sentence stays)
@@ -1986,7 +1989,7 @@ function browserSentences(text) {
   return segmentForSpeech(text)
     .filter(u => !u.silent)
     .map(u => {
-      let t = u.text.replace(/\s*[—–]\s*(?=[A-Za-z0-9])/g, ', ');
+      let t = u.text.replace(/\s*[—–]\s*(?=[A-Za-z0-9])/g, ', ').replace(/[\[\]]/g, '');
       if (u.pause >= PAUSE_MS.paragraph && !TERMINAL_RE.test(t)) t += '.';
       return t;
     });
