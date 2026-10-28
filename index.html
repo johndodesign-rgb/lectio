@@ -909,7 +909,7 @@
       <span class="voice-modal-title">Azure TTS</span>
       <button class="voice-modal-close" id="azure-modal-close">✕</button>
     </div>
-    <div class="voice-modal-hint">Your key is stored locally and never sent anywhere except Microsoft.</div>
+    <div class="voice-modal-hint" id="azure-hint">Your key is stored locally and never sent anywhere except Microsoft.</div>
     <div class="pronun-add-row" style="flex-direction:column; align-items:stretch; gap:10px;">
       <div style="display:flex; flex-direction:column; gap:6px;">
         <label style="font-family:'DM Mono',monospace; font-size:.65rem; color:var(--text-dim); letter-spacing:.06em;">API KEY</label>
@@ -984,7 +984,7 @@ const $ = id => document.getElementById(id);
 // ─── App version ─────────────────────────────────────────────────────────────
 // Bump this (and CACHE in sw.js) with every release so you can see which
 // version the phone is actually running.
-const APP_VERSION = 'v23 · Oct 28';
+const APP_VERSION = 'v24 · Oct 28';
 $('app-version').textContent = APP_VERSION;
 
 const dropZone      = $('drop-zone');
@@ -1335,7 +1335,13 @@ let azureKey    = localStorage.getItem('lectio_azure_key')    || '';
 let azureRegion = localStorage.getItem('lectio_azure_region') || 'eastus';
 let azureVoice  = localStorage.getItem('lectio_azure_voice')  || 'en-GB-RyanNeural';
 
-function azureEnabled() { return !!azureKey; }
+// Lectio key server (Cloudflare Worker, see worker/lectio-tts.js). It holds the
+// Azure key, so devices don't need one. A key typed into ⚙ on a device still
+// takes priority on that device.
+const KEY_SERVER_URL = '';
+
+function usingKeyServer() { return !azureKey && !!KEY_SERVER_URL; }
+function azureEnabled() { return !!azureKey || !!KEY_SERVER_URL; }
 
 // ─── Speech segmentation: sentences, headings and pauses ─────────────────────
 // Pause lengths in milliseconds. Tune these to taste.
@@ -1524,6 +1530,16 @@ let azureAbort      = new AbortController();
 const AZURE_CHUNK_SIZES = [30, 80, 200];
 
 async function azureSynthesize(ssml, signal) {
+  if (usingKeyServer()) {
+    const res = await fetch(KEY_SERVER_URL.replace(/\/+$/, '') + '/tts', {
+      method: 'POST',
+      signal,
+      headers: { 'Content-Type': 'application/ssml+xml' },
+      body: ssml,
+    });
+    if (!res.ok) throw new Error(`Azure TTS error: ${res.status}`);
+    return URL.createObjectURL(await res.blob());
+  }
   const res = await fetch(
     `https://${azureRegion}.tts.speech.microsoft.com/cognitiveservices/v1`,
     {
@@ -1763,7 +1779,16 @@ function renderAzureVoiceList() {
   });
 }
 
+function updateAzureHint() {
+  $('azure-hint').textContent = usingKeyServer()
+    ? 'Connected through your Lectio key server — no key needed on this device. Entering a key here overrides it on this device only.'
+    : KEY_SERVER_URL
+      ? 'Using the key saved on this device. Clear it to switch back to your Lectio key server.'
+      : 'Your key is stored locally and never sent anywhere except Microsoft.';
+}
+
 $('azure-btn').addEventListener('click', () => {
+  updateAzureHint();
   $('azure-key-input').value    = azureKey ? '••••••••••••••••' : '';
   $('azure-region-input').value = azureRegion;
   renderAzureVoiceList();
@@ -1814,7 +1839,8 @@ $('azure-clear-btn').addEventListener('click', () => {
   azureKey = '';
   localStorage.removeItem('lectio_azure_key');
   $('azure-key-input').value = '';
-  showAzureStatus('Key cleared — using browser TTS');
+  showAzureStatus(KEY_SERVER_URL ? 'Key cleared — using your Lectio key server' : 'Key cleared — using browser TTS');
+  updateAzureHint();
   updatePickerLabel();
 });
 
@@ -1841,6 +1867,7 @@ $('voice-picker-btn').removeEventListener('click', openVoiceModal);
 $('voice-picker-btn').addEventListener('click', () => {
   unlockTTS();
   if (azureEnabled()) {
+    updateAzureHint();
     $('azure-key-input').value    = azureKey ? '••••••••••••••••' : '';
     $('azure-region-input').value = azureRegion;
     renderAzureVoiceList();
