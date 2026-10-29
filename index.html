@@ -578,25 +578,53 @@
     color: var(--text-dim);
     letter-spacing: .06em;
   }
-  .settings-key {
-    margin-top: 18px;
-    border-top: 1px solid var(--border);
-  }
-  .settings-key summary {
+  .settings-section { border-bottom: 1px solid var(--border); }
+  .settings-section summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     font-family: 'DM Mono', monospace;
     font-size: .6rem;
     letter-spacing: .12em;
     text-transform: uppercase;
     color: var(--amber-dim);
-    padding: 14px 8px 8px;
+    padding: 16px 8px 12px;
     cursor: pointer;
     list-style: none;
+    -webkit-tap-highlight-color: transparent;
   }
-  .settings-key summary::-webkit-details-marker { display: none; }
-  .settings-key summary::before { content: '▸ '; }
-  .settings-key[open] summary::before { content: '▾ '; }
-  .settings-key .voice-modal-hint { padding: 0 8px 4px; }
-  .settings-key .pronun-add-row { padding: 8px 8px 0; }
+  .settings-section summary::-webkit-details-marker { display: none; }
+  .settings-section summary:hover { color: var(--amber); }
+  .section-toggle {
+    font-size: 1rem;
+    line-height: 1;
+    letter-spacing: 0;
+    width: 22px;
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border);
+    border-radius: 50%;
+  }
+  .section-right { display: inline-flex; align-items: center; gap: 10px; min-width: 0; }
+  .section-current {
+    text-transform: none;
+    letter-spacing: .04em;
+    color: var(--amber);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 150px;
+  }
+  .section-current:not(:empty)::before { content: '● '; font-size: .5rem; vertical-align: middle; }
+  .section-toggle { flex-shrink: 0; }
+  .section-toggle::before { content: '+'; }
+  .settings-section[open] .section-toggle::before { content: '−'; }
+  .settings-section[open] > summary { padding-bottom: 6px; }
+  .settings-section > :not(summary):last-child { padding-bottom: 12px; }
+  #azure-key-section .voice-modal-hint { padding: 0 8px 4px; }
+  #azure-key-section .pronun-add-row { padding: 8px 8px 12px; }
 
   .voice-group-label {
     font-family: 'DM Mono', monospace;
@@ -916,14 +944,8 @@
     <div class="voice-modal-hint">Tap ▶ to preview · tap a voice to use it</div>
     <div id="azure-status-msg" class="settings-status" style="display:none;"></div>
     <div class="settings-scroll">
-      <div id="azure-voice-section">
-        <div class="voice-group-label">Azure voices</div>
-        <div id="azure-voice-list"></div>
-      </div>
-      <div id="azure-voice-missing" class="settings-note" style="display:none;">Add an Azure key below for natural-sounding voices.</div>
-      <div id="voice-list"></div>
-      <details id="azure-key-section" class="settings-key">
-        <summary>Azure key &amp; region</summary>
+      <details id="azure-key-section" class="settings-section">
+        <summary><span>Azure key &amp; region</span><span class="section-toggle" aria-hidden="true"></span></summary>
         <div class="voice-modal-hint" id="azure-hint">Your key is stored locally and never sent anywhere except Microsoft.</div>
         <div class="pronun-add-row" style="flex-direction:column; align-items:stretch; gap:10px;">
           <div style="display:flex; flex-direction:column; gap:6px;">
@@ -939,6 +961,15 @@
             <button class="resume-no" id="azure-clear-btn">Clear Key</button>
           </div>
         </div>
+      </details>
+      <details id="azure-voice-section" class="settings-section">
+        <summary><span>Azure voices</span><span class="section-right"><span class="section-current" id="azure-current"></span><span class="section-toggle" aria-hidden="true"></span></span></summary>
+        <div id="azure-voice-list"></div>
+      </details>
+      <div id="azure-voice-missing" class="settings-note" style="display:none;">Add an Azure key above for natural-sounding voices.</div>
+      <details id="device-voice-section" class="settings-section">
+        <summary><span>This device's voices</span><span class="section-right"><span class="section-current" id="device-current"></span><span class="section-toggle" aria-hidden="true"></span></span></summary>
+        <div id="voice-list"></div>
       </details>
     </div>
   </div>
@@ -987,7 +1018,7 @@ const $ = id => document.getElementById(id);
 // ─── App version ─────────────────────────────────────────────────────────────
 // Bump this (and CACHE in sw.js) with every release so you can see which
 // version the phone is actually running.
-const APP_VERSION = 'v26 · Oct 29';
+const APP_VERSION = 'v27 · Oct 29';
 $('app-version').textContent = APP_VERSION;
 
 const dropZone      = $('drop-zone');
@@ -1117,10 +1148,10 @@ function renderVoiceList() {
     voices.forEach(v => list.appendChild(makeVoiceRow(v)));
   }
 
-  renderGroup(t3, 'This device · Premium');
-  renderGroup(t2, 'This device · Enhanced');
-  renderGroup(t1, 'This device');
-  renderGroup(t0, 'This device · Network (lower quality)');
+  renderGroup(t3, '✦ Premium');
+  renderGroup(t2, '✦ Enhanced');
+  renderGroup(t1, 'Standard');
+  renderGroup(t0, 'Network (lower quality)');
 }
 
 function makeVoiceRow(voice) {
@@ -1733,7 +1764,7 @@ function renderAzureVoiceList() {
         <div class="voice-name">${v.name}</div>
         <div class="voice-meta">${v.desc} · ${v.locale}</div>
       </div>
-      <span class="voice-badge azure-badge">${v.tier || 'AZURE'}</span>
+      <span class="voice-badge azure-badge">${v.tier || 'CLASSIC'}</span>
     `;
     row.addEventListener('click', e => {
       if (e.target.closest('.voice-preview-btn')) return;
@@ -1779,14 +1810,10 @@ function openSettings() {
   updateAzureHint();
   $('azure-key-input').value    = azureKey ? '••••••••••••••••' : '';
   $('azure-region-input').value = azureRegion;
-  // Open the key section only when there's no way to reach Azure yet
-  $('azure-key-section').open = !azureEnabled();
+  applySectionDefaults();
   $('azure-modal').classList.remove('hidden');
   renderAllVoiceLists();
-  setTimeout(() => {
-    const sel = $('azure-modal').querySelector('.voice-row.selected');
-    if (sel) sel.scrollIntoView({ block: 'center' });
-  }, 50);
+  document.querySelector('#azure-modal .settings-scroll').scrollTop = 0;
 }
 function closeSettings() {
   stopPreview();
@@ -1856,12 +1883,37 @@ function updatePickerLabel() {
   if (!$('azure-modal').classList.contains('hidden')) renderAllVoiceLists();
 }
 
+// Remember which panel sections are expanded (per device, best effort)
+const SECTION_IDS = ['azure-key-section', 'azure-voice-section', 'device-voice-section'];
+function savedSectionOpen(id) {
+  try { const v = localStorage.getItem('lectio_open_' + id); return v === null ? null : v === '1'; } catch { return null; }
+}
+function applySectionDefaults() {
+  const def = {
+    'azure-key-section':    !azureEnabled(),   // open only if there's no way to reach Azure yet
+    'azure-voice-section':  true,
+    'device-voice-section': !useAzure(),       // open when a device voice is in use
+  };
+  SECTION_IDS.forEach(id => {
+    const saved = savedSectionOpen(id);
+    $(id).open = id === 'azure-key-section' && !azureEnabled() ? true : (saved ?? def[id]);
+  });
+}
+SECTION_IDS.forEach(id => $(id).addEventListener('toggle', () => {
+  try { localStorage.setItem('lectio_open_' + id, $(id).open ? '1' : '0'); } catch {}
+}));
+
 function renderAllVoiceLists() {
   const hasAzure = azureEnabled();
   $('azure-voice-section').style.display = hasAzure ? '' : 'none';
   $('azure-voice-missing').style.display = hasAzure ? 'none' : '';
   if (hasAzure) renderAzureVoiceList();
   renderVoiceList();
+  // Show the voice in use next to its section heading
+  const av = AZURE_VOICES.find(v => v.id === azureVoice);
+  const dv = allVoices.find(v => v.voiceURI === selectedVoiceURI);
+  $('azure-current').textContent  = useAzure() && av ? `${av.name} ${av.tier || 'Classic'}` : '';
+  $('device-current').textContent = !useAzure() && dv ? shortName(dv.name) : '';
 }
 
 
