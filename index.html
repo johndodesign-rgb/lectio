@@ -489,31 +489,6 @@
     padding: 10px;
   }
 
-  /* ── Voice picker button ── */
-  .voice-picker-btn {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    color: var(--text-mid);
-    font-family: 'DM Mono', monospace;
-    font-size: .65rem;
-    padding: 5px 10px;
-    border-radius: var(--radius);
-    cursor: pointer;
-    max-width: 180px;
-    transition: border-color .15s, color .15s;
-  }
-  .voice-picker-btn:hover { border-color: var(--amber-dim); color: var(--amber); }
-  #voice-picker-label {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 140px;
-  }
-  .voice-picker-caret { opacity: .5; flex-shrink: 0; }
-
   /* ── Voice modal ── */
   .voice-modal {
     position: fixed;
@@ -577,13 +552,51 @@
     flex-shrink: 0;
   }
 
-  #voice-list {
+  .settings-scroll {
     overflow-y: auto;
     flex: 1;
-    padding: 8px 12px 20px;
+    padding: 0 12px 24px;
     scrollbar-width: thin;
     scrollbar-color: var(--border) transparent;
+    -webkit-overflow-scrolling: touch;
   }
+  .settings-status {
+    font-family: 'DM Mono', monospace;
+    font-size: .68rem;
+    color: var(--amber);
+    padding: 0 20px 8px;
+  }
+  .settings-note {
+    font-family: 'DM Mono', monospace;
+    font-size: .62rem;
+    color: var(--text-dim);
+    padding: 12px 8px 4px;
+  }
+  .settings-field-label {
+    font-family: 'DM Mono', monospace;
+    font-size: .65rem;
+    color: var(--text-dim);
+    letter-spacing: .06em;
+  }
+  .settings-key {
+    margin-top: 18px;
+    border-top: 1px solid var(--border);
+  }
+  .settings-key summary {
+    font-family: 'DM Mono', monospace;
+    font-size: .6rem;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--amber-dim);
+    padding: 14px 8px 8px;
+    cursor: pointer;
+    list-style: none;
+  }
+  .settings-key summary::-webkit-details-marker { display: none; }
+  .settings-key summary::before { content: '▸ '; }
+  .settings-key[open] summary::before { content: '▾ '; }
+  .settings-key .voice-modal-hint { padding: 0 8px 4px; }
+  .settings-key .pronun-add-row { padding: 8px 8px 0; }
 
   .voice-group-label {
     font-family: 'DM Mono', monospace;
@@ -821,8 +834,6 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
-    max-height: 240px;
-    overflow-y: auto;
     scrollbar-width: thin;
     scrollbar-color: var(--border) transparent;
   }
@@ -874,17 +885,10 @@
         <button class="ctrl-btn" id="fwd-btn" title="Forward 10s">&#187;</button>
         <button class="ctrl-btn" id="close-btn" title="Open new file">&#8635; File</button>
         <button class="ctrl-btn" id="pronun-btn" title="Pronunciation dictionary">Aa</button>
-        <button class="ctrl-btn" id="azure-btn" title="Azure TTS settings">⚙</button>
+        <button class="ctrl-btn" id="azure-btn" title="Voice &amp; settings">⚙</button>
       </div>
 
       <div class="settings-row">
-        <div class="setting">
-          <label>VOICE</label>
-          <button class="voice-picker-btn" id="voice-picker-btn">
-            <span id="voice-picker-label">Loading…</span>
-            <span class="voice-picker-caret">▾</span>
-          </button>
-        </div>
         <div class="setting">
           <label>SPEED</label>
           <input type="range" id="rate-slider" min="0.5" max="2" step="0.1" value="1">
@@ -902,32 +906,40 @@
   </div>
 </div>
 
-<!-- Azure TTS Settings Modal -->
+<!-- Voice & Settings Modal -->
 <div id="azure-modal" class="voice-modal hidden">
   <div class="voice-modal-inner pronun-inner">
     <div class="voice-modal-header">
-      <span class="voice-modal-title">Azure TTS</span>
+      <span class="voice-modal-title">Voice</span>
       <button class="voice-modal-close" id="azure-modal-close">✕</button>
     </div>
-    <div class="voice-modal-hint" id="azure-hint">Your key is stored locally and never sent anywhere except Microsoft.</div>
-    <div class="pronun-add-row" style="flex-direction:column; align-items:stretch; gap:10px;">
-      <div style="display:flex; flex-direction:column; gap:6px;">
-        <label style="font-family:'DM Mono',monospace; font-size:.65rem; color:var(--text-dim); letter-spacing:.06em;">API KEY</label>
-        <input class="pronun-input" id="azure-key-input" type="password" placeholder="Paste your Azure Speech key" spellcheck="false" autocomplete="off">
+    <div class="voice-modal-hint">Tap ▶ to preview · tap a voice to use it</div>
+    <div id="azure-status-msg" class="settings-status" style="display:none;"></div>
+    <div class="settings-scroll">
+      <div id="azure-voice-section">
+        <div class="voice-group-label">Azure voices</div>
+        <div id="azure-voice-list"></div>
       </div>
-      <div style="display:flex; flex-direction:column; gap:6px;">
-        <label style="font-family:'DM Mono',monospace; font-size:.65rem; color:var(--text-dim); letter-spacing:.06em;">REGION</label>
-        <input class="pronun-input" id="azure-region-input" type="text" placeholder="e.g. eastus" spellcheck="false" autocomplete="off" value="eastus">
-      </div>
-      <div style="display:flex; gap:8px; margin-top:4px;">
-        <button class="pronun-add-btn" id="azure-save-btn">Save & Enable</button>
-        <button class="resume-no" id="azure-clear-btn">Clear Key</button>
-      </div>
-      <div id="azure-status-msg" style="font-family:'DM Mono',monospace; font-size:.68rem; color:var(--amber); display:none;"></div>
-    </div>
-    <div style="padding: 12px 16px 8px;">
-      <div class="voice-group-label" style="padding:8px 0 10px;">AZURE VOICES</div>
-      <div id="azure-voice-list"></div>
+      <div id="azure-voice-missing" class="settings-note" style="display:none;">Add an Azure key below for natural-sounding voices.</div>
+      <div id="voice-list"></div>
+      <details id="azure-key-section" class="settings-key">
+        <summary>Azure key &amp; region</summary>
+        <div class="voice-modal-hint" id="azure-hint">Your key is stored locally and never sent anywhere except Microsoft.</div>
+        <div class="pronun-add-row" style="flex-direction:column; align-items:stretch; gap:10px;">
+          <div style="display:flex; flex-direction:column; gap:6px;">
+            <label class="settings-field-label">API KEY</label>
+            <input class="pronun-input" id="azure-key-input" type="password" placeholder="Paste your Azure Speech key" spellcheck="false" autocomplete="off">
+          </div>
+          <div style="display:flex; flex-direction:column; gap:6px;">
+            <label class="settings-field-label">REGION</label>
+            <input class="pronun-input" id="azure-region-input" type="text" placeholder="e.g. eastus" spellcheck="false" autocomplete="off" value="eastus">
+          </div>
+          <div style="display:flex; gap:8px; margin-top:4px;">
+            <button class="pronun-add-btn" id="azure-save-btn">Save &amp; Enable</button>
+            <button class="resume-no" id="azure-clear-btn">Clear Key</button>
+          </div>
+        </div>
+      </details>
     </div>
   </div>
 </div>
@@ -954,16 +966,7 @@
 </div>
 
 <!-- Voice Picker Modal -->
-<div id="voice-modal" class="voice-modal hidden">
-  <div class="voice-modal-inner">
-    <div class="voice-modal-header">
-      <span class="voice-modal-title">Choose a Voice</span>
-      <button class="voice-modal-close" id="voice-modal-close">✕</button>
-    </div>
-    <div class="voice-modal-hint">Tap ▶ to preview · tap a row to select</div>
-    <div id="voice-list"></div>
-  </div>
-</div>
+
 
 <div id="loading"><div class="spinner"></div><p id="loading-msg">Parsing file…</p><div id="loading-progress-track"><div id="loading-progress-fill"></div></div></div>
 
@@ -984,7 +987,7 @@ const $ = id => document.getElementById(id);
 // ─── App version ─────────────────────────────────────────────────────────────
 // Bump this (and CACHE in sw.js) with every release so you can see which
 // version the phone is actually running.
-const APP_VERSION = 'v25 · Oct 28';
+const APP_VERSION = 'v26 · Oct 29';
 $('app-version').textContent = APP_VERSION;
 
 const dropZone      = $('drop-zone');
@@ -1090,10 +1093,6 @@ function showChromeTip() {
 }
 
 
-function updatePickerLabel() {
-  const v = allVoices.find(v => v.voiceURI === selectedVoiceURI);
-  $('voice-picker-label').textContent = v ? shortName(v.name) : 'Choose voice';
-}
 
 function shortName(name) {
   // Strip vendor prefixes like "Google US English" → "US English"
@@ -1118,15 +1117,15 @@ function renderVoiceList() {
     voices.forEach(v => list.appendChild(makeVoiceRow(v)));
   }
 
-  renderGroup(t3, '✦ macOS Premium');
-  renderGroup(t2, '✦ Enhanced');
-  renderGroup(t1, 'Local');
-  renderGroup(t0, 'Network (lower quality)');
+  renderGroup(t3, 'This device · Premium');
+  renderGroup(t2, 'This device · Enhanced');
+  renderGroup(t1, 'This device');
+  renderGroup(t0, 'This device · Network (lower quality)');
 }
 
 function makeVoiceRow(voice) {
   const row = document.createElement('div');
-  row.className = 'voice-row' + (voice.voiceURI === selectedVoiceURI ? ' selected' : '');
+  row.className = 'voice-row' + (!useAzure() && voice.voiceURI === selectedVoiceURI ? ' selected' : '');
   row.dataset.uri = voice.voiceURI;
 
   const tier = scoreVoice(voice);
@@ -1145,7 +1144,6 @@ function makeVoiceRow(voice) {
   row.addEventListener('click', (e) => {
     if (e.target.closest('.voice-preview-btn')) return;
     selectVoice(voice.voiceURI);
-    closeVoiceModal();
   });
 
   row.querySelector('.voice-preview-btn').addEventListener('click', (e) => {
@@ -1159,9 +1157,9 @@ function makeVoiceRow(voice) {
 function selectVoice(uri) {
   selectedVoiceURI = uri;
   localStorage.setItem('lectio_voice', uri);
-  updatePickerLabel();
+  setVoiceEngine('device');
   // Re-render to update selected state
-  renderVoiceList();
+  renderAllVoiceLists();
   // If currently playing, restart with new voice
   if (state.isPlaying) {
     const wi = state.wordIndex;
@@ -1197,32 +1195,13 @@ function previewVoice(voice, btn) {
   speechSynthesis.speak(utt);
 }
 
-function openVoiceModal() {
-  renderVoiceList();
-  $('voice-modal').classList.remove('hidden');
-  // Scroll selected into view
-  setTimeout(() => {
-    const sel = $('voice-list').querySelector('.selected');
-    if (sel) sel.scrollIntoView({ block: 'center' });
-  }, 50);
+function stopPreview() {
+  if (previewingURI) { speechSynthesis.cancel(); previewingURI = null; }
 }
 
-function closeVoiceModal() {
-  speechSynthesis.cancel();
-  previewingURI = null;
-  $('voice-modal').classList.add('hidden');
-}
-
-$('voice-picker-btn').addEventListener('click', () => {
-  unlockTTS();
-  openVoiceModal();
-});
-$('voice-modal-close').addEventListener('click', closeVoiceModal);
-$('voice-modal').addEventListener('click', (e) => {
-  if (e.target === $('voice-modal')) closeVoiceModal();
-});
-
-loadVoices();
+// Run after the rest of the script has loaded: the voice list needs the
+// Azure settings, which are defined further down
+queueMicrotask(loadVoices);
 speechSynthesis.onvoiceschanged = loadVoices;
 
 // Helper: get currently selected voice object
@@ -1342,6 +1321,14 @@ const KEY_SERVER_URL = 'https://lectio-tts.johndo-design.workers.dev';
 
 function usingKeyServer() { return !azureKey && !!KEY_SERVER_URL; }
 function azureEnabled() { return !!azureKey || !!KEY_SERVER_URL; }
+
+// Which kind of voice is selected: 'azure' or 'device' (the phone/computer's own)
+let voiceEngine = localStorage.getItem('lectio_engine') || 'azure';
+function useAzure() { return azureEnabled() && voiceEngine === 'azure'; }
+function setVoiceEngine(engine) {
+  voiceEngine = engine;
+  try { localStorage.setItem('lectio_engine', engine); } catch {}
+}
 
 // ─── Speech segmentation: sentences, headings and pauses ─────────────────────
 // Pause lengths in milliseconds. Tune these to taste.
@@ -1739,7 +1726,7 @@ function renderAzureVoiceList() {
   list.innerHTML = '';
   AZURE_VOICES.forEach(v => {
     const row = document.createElement('div');
-    row.className = 'voice-row' + (v.id === azureVoice ? ' selected' : '');
+    row.className = 'voice-row' + (useAzure() && v.id === azureVoice ? ' selected' : '');
     row.innerHTML = `
       <button class="voice-preview-btn" title="Preview">▶</button>
       <div class="voice-info">
@@ -1752,9 +1739,9 @@ function renderAzureVoiceList() {
       if (e.target.closest('.voice-preview-btn')) return;
       azureVoice = v.id;
       localStorage.setItem('lectio_azure_voice', azureVoice);
-      updatePickerLabel();
-      renderAzureVoiceList();
-      if (state.isPlaying) { const wi = state.wordIndex; startAzureSpeech(wi); }
+      setVoiceEngine('azure');
+      renderAllVoiceLists();
+      if (state.isPlaying) startSpeech(state.wordIndex);
     });
     row.querySelector('.voice-preview-btn').addEventListener('click', async e => {
       e.stopPropagation();
@@ -1787,15 +1774,27 @@ function updateAzureHint() {
       : 'Your key is stored locally and never sent anywhere except Microsoft.';
 }
 
-$('azure-btn').addEventListener('click', () => {
+function openSettings() {
+  unlockTTS();
   updateAzureHint();
   $('azure-key-input').value    = azureKey ? '••••••••••••••••' : '';
   $('azure-region-input').value = azureRegion;
-  renderAzureVoiceList();
+  // Open the key section only when there's no way to reach Azure yet
+  $('azure-key-section').open = !azureEnabled();
   $('azure-modal').classList.remove('hidden');
-});
-$('azure-modal-close').addEventListener('click', () => $('azure-modal').classList.add('hidden'));
-$('azure-modal').addEventListener('click', e => { if (e.target === $('azure-modal')) $('azure-modal').classList.add('hidden'); });
+  renderAllVoiceLists();
+  setTimeout(() => {
+    const sel = $('azure-modal').querySelector('.voice-row.selected');
+    if (sel) sel.scrollIntoView({ block: 'center' });
+  }, 50);
+}
+function closeSettings() {
+  stopPreview();
+  $('azure-modal').classList.add('hidden');
+}
+$('azure-btn').addEventListener('click', openSettings);
+$('azure-modal-close').addEventListener('click', closeSettings);
+$('azure-modal').addEventListener('click', e => { if (e.target === $('azure-modal')) closeSettings(); });
 
 $('azure-save-btn').addEventListener('click', async () => {
   const keyInput = $('azure-key-input').value.trim();
@@ -1827,6 +1826,7 @@ $('azure-save-btn').addEventListener('click', async () => {
     );
     if (!testRes.ok) throw new Error(`${testRes.status}`);
     showAzureStatus('✓ Connected — Azure TTS enabled');
+    setVoiceEngine('azure');
     updatePickerLabel();
   } catch (err) {
     showAzureStatus('⚠ Auth failed — check your key and region');
@@ -1839,7 +1839,7 @@ $('azure-clear-btn').addEventListener('click', () => {
   azureKey = '';
   localStorage.removeItem('lectio_azure_key');
   $('azure-key-input').value = '';
-  showAzureStatus(KEY_SERVER_URL ? 'Key cleared — using your Lectio key server' : 'Key cleared — using browser TTS');
+  showAzureStatus(KEY_SERVER_URL ? 'Key cleared — using your Lectio key server' : 'Key cleared — using this device\'s voices');
   updateAzureHint();
   updatePickerLabel();
 });
@@ -1851,34 +1851,20 @@ function showAzureStatus(msg) {
   setTimeout(() => el.style.display = 'none', 4000);
 }
 
-// Update voice picker label to show Azure or browser voice
+// Refresh the voice lists if the panel is open (e.g. after a key change)
 function updatePickerLabel() {
-  if (azureEnabled()) {
-    const v = AZURE_VOICES.find(v => v.id === azureVoice);
-    $('voice-picker-label').textContent = v ? `Azure · ${v.name}${v.tier ? ' ' + v.tier : ''}` : 'Azure TTS';
-  } else {
-    const v = allVoices.find(v => v.voiceURI === selectedVoiceURI);
-    $('voice-picker-label').textContent = v ? shortName(v.name) : 'Choose voice';
-  }
+  if (!$('azure-modal').classList.contains('hidden')) renderAllVoiceLists();
 }
 
-// Override voice picker button — show Azure modal if enabled, else browser picker
-$('voice-picker-btn').removeEventListener('click', openVoiceModal);
-$('voice-picker-btn').addEventListener('click', () => {
-  unlockTTS();
-  if (azureEnabled()) {
-    updateAzureHint();
-    $('azure-key-input').value    = azureKey ? '••••••••••••••••' : '';
-    $('azure-region-input').value = azureRegion;
-    renderAzureVoiceList();
-    $('azure-modal').classList.remove('hidden');
-  } else {
-    openVoiceModal();
-  }
-});
+function renderAllVoiceLists() {
+  const hasAzure = azureEnabled();
+  $('azure-voice-section').style.display = hasAzure ? '' : 'none';
+  $('azure-voice-missing').style.display = hasAzure ? 'none' : '';
+  if (hasAzure) renderAzureVoiceList();
+  renderVoiceList();
+}
 
-// Init Azure label
-if (azureEnabled()) updatePickerLabel();
+
 
 
 // Seeded with common Vietnamese, Teochew, Malay terms
@@ -2023,7 +2009,11 @@ function browserSentences(text) {
 }
 
 function startSpeech(fromWordIndex = 0) {
-  if (azureEnabled()) {
+  // Stop whichever engine might be running before starting the selected one
+  stopAzure();
+  speechSynthesis.cancel();
+  stopKeepalive();
+  if (useAzure()) {
     azureChunkIdx = 0;
     startAzureSpeech(fromWordIndex);
     return;
@@ -2142,7 +2132,7 @@ function browserStartSpeech(fromWordIndex = 0) {
 }
 
 function stopSpeech() {
-  if (azureEnabled()) stopAzure();
+  stopAzure();
   speechSynthesis.cancel();
   stopKeepalive();
   releaseWakeLock();
@@ -2223,14 +2213,14 @@ playBtn.addEventListener('click', () => {
   if (!state.chapters.length) return;
 
   if (state.isPlaying) {
-    if (azureEnabled() && azureAudio) azureAudio.pause();
+    if (useAzure() && azureAudio) azureAudio.pause();
     else { speechSynthesis.pause(); stopKeepalive(); }
     releaseWakeLock();
     state.isPlaying = false;
     playBtn.innerHTML = '&#9654;';
     setStatus('paused');
   } else {
-    if (azureEnabled()) {
+    if (useAzure()) {
       if (azureAudio && azureAudio.paused && azureAudio.src) {
         azureAudio.play();
         acquireWakeLock();
