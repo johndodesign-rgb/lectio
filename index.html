@@ -1018,7 +1018,7 @@ const $ = id => document.getElementById(id);
 // ─── App version ─────────────────────────────────────────────────────────────
 // Bump this (and CACHE in sw.js) with every release so you can see which
 // version the phone is actually running.
-const APP_VERSION = 'v28 · Oct 31';
+const APP_VERSION = 'v29 · Oct 31';
 $('app-version').textContent = APP_VERSION;
 
 const dropZone      = $('drop-zone');
@@ -2079,6 +2079,10 @@ function startSpeech(fromWordIndex = 0) {
 // (Safari fires onend/onerror after cancel) can't affect the new one
 let browserSession = 0;
 const isSafari = /^((?!chrome|android|crios|fxios).)*safari/i.test(navigator.userAgent);
+const isAndroid = /android/i.test(navigator.userAgent);
+// The pause/resume keepalive works around desktop Chrome cutting speech off
+// after ~15s. On Android, pause() stops speech outright, and Safari doesn't need it.
+const needsKeepalive = !isSafari && !isAndroid;
 
 function browserStartSpeech(fromWordIndex = 0) {
   speechSynthesis.cancel();
@@ -2212,7 +2216,7 @@ function browserStartSpeech(fromWordIndex = 0) {
 
   // Safari fails an utterance spoken right after cancel(); give it a moment
   setTimeout(speakChunk, 150);
-  if (!isSafari) startKeepalive(); // pause/resume trick is for Chrome's 15s cutoff only
+  if (needsKeepalive) startKeepalive();
   acquireWakeLock();
   showTeleprompterBand();
   state.isPlaying = true;
@@ -2323,7 +2327,7 @@ playBtn.addEventListener('click', () => {
     } else {
       if (speechSynthesis.paused && speechSynthesis.speaking) {
         speechSynthesis.resume();
-        if (!isSafari) startKeepalive();
+        if (needsKeepalive) startKeepalive();
         acquireWakeLock();
         state.isPlaying = true;
         playBtn.innerHTML = '&#9646;&#9646;';
