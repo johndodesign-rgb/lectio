@@ -1018,7 +1018,7 @@ const $ = id => document.getElementById(id);
 // ─── App version ─────────────────────────────────────────────────────────────
 // Bump this (and CACHE in sw.js) with every release so you can see which
 // version the phone is actually running.
-const APP_VERSION = 'v29 · Oct 31';
+const APP_VERSION = 'v30 · Oct 31';
 $('app-version').textContent = APP_VERSION;
 
 const dropZone      = $('drop-zone');
@@ -2062,6 +2062,7 @@ function browserSentences(text) {
 }
 
 function startSpeech(fromWordIndex = 0) {
+  const wasSpeaking = speechSynthesis.speaking || speechSynthesis.pending;
   // Stop whichever engine might be running before starting the selected one
   browserSession++;
   stopAzure();
@@ -2072,7 +2073,7 @@ function startSpeech(fromWordIndex = 0) {
     startAzureSpeech(fromWordIndex);
     return;
   }
-  browserStartSpeech(fromWordIndex);
+  browserStartSpeech(fromWordIndex, wasSpeaking);
 }
 
 // Bumped on every start/stop so late events from a cancelled utterance
@@ -2084,7 +2085,7 @@ const isAndroid = /android/i.test(navigator.userAgent);
 // after ~15s. On Android, pause() stops speech outright, and Safari doesn't need it.
 const needsKeepalive = !isSafari && !isAndroid;
 
-function browserStartSpeech(fromWordIndex = 0) {
+function browserStartSpeech(fromWordIndex = 0, wasSpeaking = true) {
   speechSynthesis.cancel();
   const session = ++browserSession;
   const stale = () => session !== browserSession;
@@ -2125,6 +2126,25 @@ function browserStartSpeech(fromWordIndex = 0) {
     // been replaced (Safari can fire onend and onerror late, or both)
     let settled = false;
     const done = () => stale() || settled || state.utterance !== utt;
+    let started = false;
+    const t0 = performance.now();
+    utt.onstart = () => {
+      started = true;
+      if (done()) return;
+      // Android doesn't report word positions, so at least track which passage
+      // is playing: resume/position-saving then lands at its start, not the
+      // start of the chapter. Word-by-word updates (where supported) refine it.
+      if (state.wordIndex < chunkStartWord) {
+        state.wordIndex = chunkStartWord;
+        renderText(chunkStartWord);
+        scrollToHighlight();
+      }
+    };
+    // Some phones never start a voice they can't use, and report nothing
+    const startWatch = setTimeout(() => {
+      if (!done() && !started && !speechSynthesis.speaking) fail('no-start');
+    }, 5000);
+    const fail = (reason) => utt.onerror({ error: reason });
     // Re-look up the voice each time: Safari can replace voice objects
     const voices = speechSynthesis.getVoices().filter(v => v.lang.startsWith('en'));
     const selectedVoice = voices.find(v => v.voiceURI === selectedVoiceURI) || getSelectedVoice();
@@ -2153,6 +2173,11 @@ function browserStartSpeech(fromWordIndex = 0) {
 
     utt.onend = () => {
       if (done()) return;
+      clearTimeout(startWatch);
+      // Android can report "finished" instantly without saying anything when
+      // a voice isn't usable. Real speech takes ~150ms+ per word.
+      const words = countWords(utt.text);
+      if (!started && words >= 3 && performance.now() - t0 < words * 60) { fail('ended-silently'); return; }
       settled = true;
       retries = 0;
       chunkIdx++;
@@ -2192,6 +2217,7 @@ function browserStartSpeech(fromWordIndex = 0) {
 
     utt.onerror = (e) => {
       if (done() || e.error === 'interrupted' || e.error === 'canceled') return;
+      clearTimeout(startWatch);
       settled = true;
       // Retry this piece: once with the chosen voice, then with the system default
       retries++;
@@ -2203,9 +2229,16 @@ function browserStartSpeech(fromWordIndex = 0) {
         return;
       }
       stopKeepalive();
-      setStatus(e.error === 'synthesis-failed' || e.error === 'voice-unavailable'
-        ? '⚠ This voice isn\'t working on this device — pick another in ⚙'
-        : 'error: ' + e.error);
+      const why = {
+        'synthesis-failed':  'the speech engine failed',
+        'voice-unavailable': 'the voice isn\'t installed',
+        'ended-silently':    'the voice played nothing',
+        'no-start':          'the voice never started',
+        'not-allowed':       'the browser blocked speech — tap play again',
+        'audio-busy':        'another app is using audio',
+        'network':           'the voice needs internet',
+      }[e.error] || e.error;
+      setStatus(`⚠ Device voice didn't play (${why}) — try another voice in ⚙`);
       state.isPlaying = false;
       playBtn.innerHTML = '&#9654;';
     };
@@ -2214,8 +2247,13 @@ function browserStartSpeech(fromWordIndex = 0) {
     speechSynthesis.speak(utt);
   }
 
-  // Safari fails an utterance spoken right after cancel(); give it a moment
-  setTimeout(speakChunk, 150);
+  // Android can be left "paused" by an earlier pause(); clear that first
+  if (isAndroid) speechSynthesis.resume();
+  // Safari and Android can fail an utterance spoken right after cancel(), so
+  // wait a moment if something was playing; otherwise speak right away, inside
+  // the tap (some browsers only allow speech that starts from a tap)
+  if (wasSpeaking) setTimeout(speakChunk, 150);
+  else speakChunk();
   if (needsKeepalive) startKeepalive();
   acquireWakeLock();
   showTeleprompterBand();
@@ -2277,11 +2315,13 @@ let ttsUnlocked = false;
 function unlockTTS() {
   if (ttsUnlocked) return;
   // iOS requires a non-empty utterance spoken synchronously in the gesture
+  ttsUnlocked = true;
+  // Only iOS needs this, and on Android it can interfere with the real speech
+  if (!/iPhone|iPad|iPod/i.test(navigator.userAgent)) return;
   const u = new SpeechSynthesisUtterance(' ');
   u.volume = 0;
   u.rate = 10; // speak as fast as possible so it's inaudible
   speechSynthesis.speak(u);
-  ttsUnlocked = true;
 }
 
 // ─── Resume after screen wakes — handled by wake lock preventing sleep ────────
@@ -2308,6 +2348,7 @@ playBtn.addEventListener('click', () => {
 
   if (state.isPlaying) {
     if (useAzure() && azureAudio) azureAudio.pause();
+    else if (isAndroid) { browserSession++; speechSynthesis.cancel(); stopKeepalive(); } // resumes from state.wordIndex
     else { speechSynthesis.pause(); stopKeepalive(); }
     releaseWakeLock();
     state.isPlaying = false;
@@ -2325,7 +2366,7 @@ playBtn.addEventListener('click', () => {
         startSpeech(state.wordIndex);
       }
     } else {
-      if (speechSynthesis.paused && speechSynthesis.speaking) {
+      if (!isAndroid && speechSynthesis.paused && speechSynthesis.speaking) {
         speechSynthesis.resume();
         if (needsKeepalive) startKeepalive();
         acquireWakeLock();
