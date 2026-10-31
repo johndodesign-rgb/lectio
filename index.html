@@ -1018,7 +1018,7 @@ const $ = id => document.getElementById(id);
 // ─── App version ─────────────────────────────────────────────────────────────
 // Bump this (and CACHE in sw.js) with every release so you can see which
 // version the phone is actually running.
-const APP_VERSION = 'v27 · Oct 29';
+const APP_VERSION = 'v28 · Oct 31';
 $('app-version').textContent = APP_VERSION;
 
 const dropZone      = $('drop-zone');
@@ -1702,6 +1702,7 @@ function playNextAzureChunk() {
         const next = state.currentChapter + 1;
         if (next < state.chapters.length) {
           setTimeout(() => {
+            if (stale() || !state.isPlaying) return;
             state.currentChapter = next;
             chapterSelect.value  = next;
             prevCh.disabled = next === 0;
@@ -2062,6 +2063,7 @@ function browserSentences(text) {
 
 function startSpeech(fromWordIndex = 0) {
   // Stop whichever engine might be running before starting the selected one
+  browserSession++;
   stopAzure();
   speechSynthesis.cancel();
   stopKeepalive();
@@ -2073,8 +2075,15 @@ function startSpeech(fromWordIndex = 0) {
   browserStartSpeech(fromWordIndex);
 }
 
+// Bumped on every start/stop so late events from a cancelled utterance
+// (Safari fires onend/onerror after cancel) can't affect the new one
+let browserSession = 0;
+const isSafari = /^((?!chrome|android|crios|fxios).)*safari/i.test(navigator.userAgent);
+
 function browserStartSpeech(fromWordIndex = 0) {
   speechSynthesis.cancel();
+  const session = ++browserSession;
+  const stale = () => session !== browserSession;
 
   const wordsOnly = state.words.filter(w => /\S/.test(w));
   const textToSpeak = getSpeakableText(fromWordIndex);
@@ -2084,10 +2093,10 @@ function browserStartSpeech(fromWordIndex = 0) {
     return;
   }
 
-  // iOS: chunk into ~200-word pieces — iOS Safari silently drops long utterances.
-  // Chunks break only between sentences.
-  const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
-  const chunkWords = isIOS ? 200 : 999999;
+  // Speak in ~120-word pieces everywhere: long utterances are dropped or fail
+  // ("synthesis-failed") on Safari and get cut off in Chrome. Chunks break
+  // only between sentences.
+  const chunkWords = 120;
   const chunks = [];
   let cur = [], curWords = 0;
   for (const s of browserSentences(textToSpeak)) {
@@ -2101,17 +2110,29 @@ function browserStartSpeech(fromWordIndex = 0) {
   let chunkIdx = 0;
   let localWordIdx = fromWordIndex;
 
+  let retries = 0;          // failures in a row for the current piece
+  let useDefaultVoice = false;
+
   function speakChunk() {
-    if (chunkIdx >= chunks.length) return;
+    if (stale() || chunkIdx >= chunks.length) return;
     const utt = new SpeechSynthesisUtterance(chunks[chunkIdx]);
+    const chunkStartWord = localWordIdx;
+    // Ignore anything this utterance reports once it has finished, failed or
+    // been replaced (Safari can fire onend and onerror late, or both)
+    let settled = false;
+    const done = () => stale() || settled || state.utterance !== utt;
+    // Re-look up the voice each time: Safari can replace voice objects
     const voices = speechSynthesis.getVoices().filter(v => v.lang.startsWith('en'));
-    const selectedVoice = getSelectedVoice();
-    if (selectedVoice) utt.voice = selectedVoice;
-    else if (voices.length) utt.voice = voices[0];
+    const selectedVoice = voices.find(v => v.voiceURI === selectedVoiceURI) || getSelectedVoice();
+    if (!useDefaultVoice) {
+      if (selectedVoice) utt.voice = selectedVoice;
+      else if (voices.length) utt.voice = voices[0];
+    }
     utt.rate  = parseFloat(rateSlider.value);
     utt.pitch = parseFloat(pitchSlider.value);
 
     utt.onboundary = (e) => {
+      if (done()) return;
       if (e.name === 'word') {
         const capturedIdx = localWordIdx;
         // Small delay to sync highlight with actual audio output
@@ -2127,6 +2148,9 @@ function browserStartSpeech(fromWordIndex = 0) {
     };
 
     utt.onend = () => {
+      if (done()) return;
+      settled = true;
+      retries = 0;
       chunkIdx++;
       if (chunkIdx < chunks.length && state.isPlaying) {
         speakChunk();
@@ -2138,8 +2162,9 @@ function browserStartSpeech(fromWordIndex = 0) {
 
         const nextChapter = state.currentChapter + 1;
         if (nextChapter < state.chapters.length) {
-          // Auto-advance and keep playing
+          // Auto-advance and keep playing (unless playback was restarted meanwhile)
           setTimeout(() => {
+            if (stale() || !state.isPlaying) return;
             state.currentChapter = nextChapter;
             chapterSelect.value  = nextChapter;
             prevCh.disabled = nextChapter === 0;
@@ -2162,20 +2187,32 @@ function browserStartSpeech(fromWordIndex = 0) {
     };
 
     utt.onerror = (e) => {
-      stopKeepalive();
-      if (e.error !== 'interrupted' && e.error !== 'canceled') {
-        setStatus('error: ' + e.error);
-        state.isPlaying = false;
-        playBtn.innerHTML = '&#9654;';
+      if (done() || e.error === 'interrupted' || e.error === 'canceled') return;
+      settled = true;
+      // Retry this piece: once with the chosen voice, then with the system default
+      retries++;
+      if (retries <= 2) {
+        if (retries === 2) useDefaultVoice = true;
+        localWordIdx = chunkStartWord;
+        speechSynthesis.cancel();
+        setTimeout(speakChunk, 300);
+        return;
       }
+      stopKeepalive();
+      setStatus(e.error === 'synthesis-failed' || e.error === 'voice-unavailable'
+        ? '⚠ This voice isn\'t working on this device — pick another in ⚙'
+        : 'error: ' + e.error);
+      state.isPlaying = false;
+      playBtn.innerHTML = '&#9654;';
     };
 
     state.utterance = utt;
     speechSynthesis.speak(utt);
   }
 
-  speakChunk();
-  startKeepalive();
+  // Safari fails an utterance spoken right after cancel(); give it a moment
+  setTimeout(speakChunk, 150);
+  if (!isSafari) startKeepalive(); // pause/resume trick is for Chrome's 15s cutoff only
   acquireWakeLock();
   showTeleprompterBand();
   state.isPlaying = true;
@@ -2184,6 +2221,7 @@ function browserStartSpeech(fromWordIndex = 0) {
 }
 
 function stopSpeech() {
+  browserSession++;
   stopAzure();
   speechSynthesis.cancel();
   stopKeepalive();
@@ -2285,7 +2323,7 @@ playBtn.addEventListener('click', () => {
     } else {
       if (speechSynthesis.paused && speechSynthesis.speaking) {
         speechSynthesis.resume();
-        startKeepalive();
+        if (!isSafari) startKeepalive();
         acquireWakeLock();
         state.isPlaying = true;
         playBtn.innerHTML = '&#9646;&#9646;';
