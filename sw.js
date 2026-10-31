@@ -1,4 +1,4 @@
-const CACHE = 'lectio-v31';
+const CACHE = 'lectio-v32';
 
 // The app's own files. Fetched fresh (bypassing the browser's HTTP cache) on
 // every install so a new version never stores a stale copy of an old one.

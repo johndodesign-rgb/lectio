@@ -75,6 +75,21 @@
 
   .wordmark span { font-style: italic; font-weight: 400; }
 
+  #app-version { cursor: pointer; }
+  #diag-log {
+    font-family: 'DM Mono', monospace;
+    font-size: .6rem;
+    line-height: 1.5;
+    color: var(--text-mid);
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-y: auto;
+    flex: 1;
+    margin: 0;
+    padding: 0 16px 24px;
+    user-select: text;
+    -webkit-user-select: text;
+  }
   .brand { display: flex; align-items: baseline; gap: 10px; flex-shrink: 0; }
   header #file-meta { min-width: 0; margin-left: 12px; }
   #app-version {
@@ -976,6 +991,23 @@
 </div>
 
 <!-- Pronunciation Dictionary Modal -->
+<!-- Diagnostics (tap the version label) -->
+<div id="diag-modal" class="voice-modal hidden">
+  <div class="voice-modal-inner pronun-inner">
+    <div class="voice-modal-header">
+      <span class="voice-modal-title">Diagnostics</span>
+      <button class="voice-modal-close" id="diag-close">✕</button>
+    </div>
+    <div class="voice-modal-hint">Press play in the app, then come back here and screenshot or copy this.</div>
+    <div style="display:flex; gap:8px; padding: 4px 16px 10px;">
+      <button class="pronun-add-btn" id="diag-test">Test device voice</button>
+      <button class="resume-no" id="diag-copy">Copy log</button>
+      <button class="resume-no" id="diag-clear">Clear</button>
+    </div>
+    <pre id="diag-log"></pre>
+  </div>
+</div>
+
 <div id="pronun-modal" class="voice-modal hidden">
   <div class="voice-modal-inner pronun-inner">
     <div class="voice-modal-header">
@@ -1012,13 +1044,39 @@ const state = {
   utterance: null,
 };
 
+// ─── Diagnostics log ─────────────────────────────────────────────────────────
+const speechLog = [];
+const logT0 = performance.now();
+function callerName(depth = 3) {
+  const line = (new Error().stack || '').split('\n')[depth] || '';
+  const m = line.match(/at (?:Object\.|HTMLButtonElement\.)?([\w$.<>]+)/) || line.match(/^([\w$]+)@/);
+  return m ? m[1] : '?';
+}
+function slog(msg) {
+  const t = ((performance.now() - logT0) / 1000).toFixed(2).padStart(7);
+  speechLog.push(`${t}s  ${msg}`);
+  if (speechLog.length > 150) speechLog.shift();
+  const el = document.getElementById('diag-log');
+  if (el && !document.getElementById('diag-modal').classList.contains('hidden')) renderDiag();
+}
+// Log every change to "is playing", and what changed it
+(() => {
+  let v = state.isPlaying;
+  Object.defineProperty(state, 'isPlaying', {
+    get() { return v; },
+    set(x) { if (x !== v) slog(`isPlaying → ${x}  (by ${callerName()})`); v = x; },
+  });
+})();
+window.addEventListener('error', e => slog('JS ERROR: ' + e.message + ' @' + (e.lineno || '?')));
+window.addEventListener('unhandledrejection', e => slog('JS PROMISE ERROR: ' + (e.reason && e.reason.message || e.reason)));
+
 // ─── Refs ─────────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
 
 // ─── App version ─────────────────────────────────────────────────────────────
 // Bump this (and CACHE in sw.js) with every release so you can see which
 // version the phone is actually running.
-const APP_VERSION = 'v31 · Oct 31';
+const APP_VERSION = 'v32 · Oct 31';
 $('app-version').textContent = APP_VERSION;
 
 const dropZone      = $('drop-zone');
@@ -2062,6 +2120,7 @@ function browserSentences(text) {
 }
 
 function startSpeech(fromWordIndex = 0) {
+  slog(`startSpeech word=${fromWordIndex} engine=${useAzure() ? 'azure' : 'device'}  (by ${callerName()})`);
   const wasSpeaking = speechSynthesis.speaking || speechSynthesis.pending;
   // Stop whichever engine might be running before starting the selected one
   browserSession++;
@@ -2094,6 +2153,7 @@ function browserStartSpeech(fromWordIndex = 0, wasSpeaking = true) {
   const textToSpeak = getSpeakableText(fromWordIndex);
 
   if (!textToSpeak.trim()) {
+    slog('device: nothing to read from word ' + fromWordIndex);
     setStatus('done');
     return;
   }
@@ -2111,6 +2171,7 @@ function browserStartSpeech(fromWordIndex = 0, wasSpeaking = true) {
     curWords += n;
   }
   if (cur.length) chunks.push(cur.join(' '));
+  slog(`device: start at word ${fromWordIndex}, ${chunks.length} pieces, wasSpeaking=${wasSpeaking}, engine speaking=${speechSynthesis.speaking} pending=${speechSynthesis.pending} paused=${speechSynthesis.paused}`);
 
   let chunkIdx = 0;
   let localWordIdx = fromWordIndex;
@@ -2129,6 +2190,7 @@ function browserStartSpeech(fromWordIndex = 0, wasSpeaking = true) {
     let started = false;
     const t0 = performance.now();
     utt.onstart = () => {
+      slog(`device: onstart piece ${chunkIdx + 1}${done() ? ' (ignored)' : ''}`);
       started = true;
       if (done()) return;
       // Android doesn't report word positions, so at least track which passage
@@ -2152,6 +2214,8 @@ function browserStartSpeech(fromWordIndex = 0, wasSpeaking = true) {
       if (selectedVoice) utt.voice = selectedVoice;
       else if (voices.length) utt.voice = voices[0];
     }
+    // Some Android speech engines fail unless the language is set explicitly
+    utt.lang = (utt.voice && utt.voice.lang ? utt.voice.lang : 'en-US').replace('_', '-');
     utt.rate  = parseFloat(rateSlider.value);
     utt.pitch = parseFloat(pitchSlider.value);
 
@@ -2172,6 +2236,7 @@ function browserStartSpeech(fromWordIndex = 0, wasSpeaking = true) {
     };
 
     utt.onend = () => {
+      slog(`device: onend piece ${chunkIdx + 1} after ${Math.round(performance.now() - t0)}ms, started=${started}${done() ? ' (ignored)' : ''}`);
       if (done()) return;
       clearTimeout(startWatch);
       // Android can report "finished" instantly without saying anything when
@@ -2216,6 +2281,7 @@ function browserStartSpeech(fromWordIndex = 0, wasSpeaking = true) {
     };
 
     utt.onerror = (e) => {
+      slog(`device: onerror "${e.error}" piece ${chunkIdx + 1}${done() ? ' (ignored)' : ''}`);
       if (done() || e.error === 'interrupted' || e.error === 'canceled') return;
       clearTimeout(startWatch);
       settled = true;
@@ -2244,7 +2310,9 @@ function browserStartSpeech(fromWordIndex = 0, wasSpeaking = true) {
     };
 
     state.utterance = utt;
-    speechSynthesis.speak(utt);
+    slog(`device: speak piece ${chunkIdx + 1}/${chunks.length} (${countWords(utt.text)} words) voice="${utt.voice ? utt.voice.name + ' / ' + utt.voice.lang + (utt.voice.localService ? '' : ' / network') : 'default'}"`);
+    try { speechSynthesis.speak(utt); }
+    catch (err) { slog('device: speak() threw ' + err.message); }
   }
 
   // Android can be left "paused" by an earlier pause(); clear that first
@@ -2263,6 +2331,7 @@ function browserStartSpeech(fromWordIndex = 0, wasSpeaking = true) {
 }
 
 function stopSpeech() {
+  slog('stopSpeech  (by ' + callerName() + ')');
   browserSession++;
   stopAzure();
   speechSynthesis.cancel();
@@ -2343,6 +2412,7 @@ function stopKeepalive() {
 
 // ─── Controls ─────────────────────────────────────────────────────────────────
 playBtn.addEventListener('click', () => {
+  slog(`PLAY TAPPED (isPlaying=${state.isPlaying})`);
   unlockTTS();
   if (!state.chapters.length) return;
 
@@ -2483,8 +2553,47 @@ function showError(msg) {
 }
 
 function setStatus(msg) {
+  slog(`status: "${msg}"  (by ${callerName()})`);
   statusBar.textContent = msg;
 }
+
+// ─── Diagnostics screen ──────────────────────────────────────────────────────
+function renderDiag() {
+  const vs = speechSynthesis.getVoices();
+  const sel = allVoices.find(v => v.voiceURI === selectedVoiceURI);
+  const head = [
+    `Lectio ${APP_VERSION}`,
+    navigator.userAgent,
+    `engine=${useAzure() ? 'azure' : 'device'}  azureVoice=${azureVoice}`,
+    `device voice: ${sel ? sel.name + ' / ' + sel.lang + (sel.localService ? ' / local' : ' / network') : '(none)'}  [${vs.length} voices, ${allVoices.length} English]`,
+    `speechSynthesis: speaking=${speechSynthesis.speaking} pending=${speechSynthesis.pending} paused=${speechSynthesis.paused}`,
+    `book: ${state.chapters.length} sections, section ${state.currentChapter + 1}, word ${state.wordIndex}/${state.words.filter(w => /\S/.test(w)).length}`,
+    '──────────',
+  ];
+  $('diag-log').textContent = head.concat(speechLog).join('\n');
+  $('diag-log').scrollTop = $('diag-log').scrollHeight;
+}
+$('app-version').addEventListener('click', () => { renderDiag(); $('diag-modal').classList.remove('hidden'); });
+$('diag-close').addEventListener('click', () => $('diag-modal').classList.add('hidden'));
+$('diag-modal').addEventListener('click', e => { if (e.target === $('diag-modal')) $('diag-modal').classList.add('hidden'); });
+$('diag-clear').addEventListener('click', () => { speechLog.length = 0; renderDiag(); });
+$('diag-copy').addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText($('diag-log').textContent); slog('(log copied)'); }
+  catch { slog('(copy failed — take a screenshot instead)'); }
+});
+// Speak one short sentence directly, bypassing all of Lectio's playback logic
+$('diag-test').addEventListener('click', () => {
+  const u = new SpeechSynthesisUtterance('Testing, one, two, three.');
+  const sel = allVoices.find(v => v.voiceURI === selectedVoiceURI);
+  if (sel) u.voice = sel;
+  u.lang = (sel && sel.lang ? sel.lang : 'en-US').replace('_', '-');
+  const t = performance.now();
+  u.onstart = () => slog('TEST: onstart');
+  u.onend   = () => slog(`TEST: onend after ${Math.round(performance.now() - t)}ms`);
+  u.onerror = e => slog('TEST: onerror "' + e.error + '"');
+  slog(`TEST: speak with ${sel ? sel.name : 'default voice'}`);
+  try { speechSynthesis.speak(u); } catch (err) { slog('TEST: speak() threw ' + err.message); }
+});
 
 // ─── Service Worker registration ──────────────────────────────────────────────
 if ('serviceWorker' in navigator) {
